@@ -5,7 +5,7 @@ import z from '@deepseek-ai/schemastery'
 import { createUserMessage, type ContentBlock, type ContextFormed, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MAX_CONTEXT_TOKENS } from './adaptive.js'
@@ -247,15 +247,19 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
   resolvePolicy()
-  const budgetContext = new AsyncLocalStorage<PlannedTask>()
+  interface ChildLaunchContext { task: PlannedTask; restriction: ToolRestriction }
+  const budgetContext = new AsyncLocalStorage<ChildLaunchContext>()
   const budgets = new Map<SessionId, PlannedTask>()
   const budgetFailures = new Map<SessionId, string>()
   ctx.on('agent/created', ({ agent }) => {
-    const task = budgetContext.getStore()
-    if (task !== undefined && agent.session.header.origin === 'subagent') budgets.set(agent.session.id, task)
+    const launch = budgetContext.getStore()
+    if (launch !== undefined && agent.session.header.origin === 'subagent') {
+      budgets.set(agent.session.id, launch.task)
+      agent.ctx.tools.restrict(launch.restriction)
+    }
     return undefined
   })
-  ctx.on('agent/disposed', ({ agent }) => { budgets.delete(agent.session.id); budgetFailures.delete(agent.session.id) })
+  ctx.on('agent/disposed', ({ agent }) => { budgets.delete(agent.session.id) })
   const resources = new ResourceManager({
     maxActiveGenerations: () => get('maxActiveGenerations'),
     hardContextTokens: () => get('hardContextTokens'), totalContextTokens: () => get('totalContextTokens'),
@@ -315,7 +319,7 @@ export function apply(ctx: Context, config: Config): void {
       const requestedCap = args.maxWorkers === undefined ? maxWorkers : positiveInteger(args.maxWorkers, 'maxWorkers')
       if (requestedCap > maxWorkers) throw new TypeError('maxWorkers exceeds the deployment ceiling')
       const provider = ctx.subagents.getProvider(get('subagentProvider'))
-      if (provider === undefined || provider.inheritsParentContext || !provider.capabilities.outputSchema || !provider.capabilities.agentOptions || !provider.capabilities.toolFilter) throw new Error('Provider must support fresh contexts, structured reports, tool restrictions and output-token limits')
+      if (provider === undefined || provider.inheritsParentContext || !provider.capabilities.outputSchema || !provider.capabilities.agentOptions) throw new Error('Provider must support fresh contexts, structured reports and output-token limits')
       const allowed = get('readOnlyTools').filter(name => ctx.tools.get(name) !== undefined)
       const deniedDelegation = ['task_orchestrate', 'subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].filter(name => ctx.tools.get(name) !== undefined)
       let resumeContext: Record<string, string> | undefined
@@ -330,11 +334,32 @@ export function apply(ctx: Context, config: Config): void {
       active.add(parent)
       try {
         const pending = runPlan({
-          parent, signal: AbortSignal.any([exec.signal, unload.signal]), readOnlyFilter: { allow: allowed },
-          ...(deniedDelegation.length === 0 ? {} : { writeFilter: { deny: deniedDelegation } }),
+          parent, signal: AbortSignal.any([exec.signal, unload.signal]),
           childIsLive: id => ctx.agents.get(id) !== undefined,
-          failureDetail: id => budgetFailures.get(id),
-          start: (request, task) => budgetContext.run(task, () => ctx.subagents.start(get('subagentProvider'), request)),
+          failureDetail: id => { const detail = budgetFailures.get(id); budgetFailures.delete(id); return detail },
+          start: (request, task) => {
+            const restriction: ToolRestriction = task.readOnly
+              ? { allow: allowed }
+              : deniedDelegation.length === 0 ? { allow: [...ctx.tools.schemas(parent).map(tool => tool.name)] } : { deny: deniedDelegation }
+            return budgetContext.run({ task, restriction }, async () => {
+              const activation = await ctx.subagents.startActivation({
+                provider: get('subagentProvider'),
+                label: request.label ?? `${task.owner}: ${task.title}`,
+                request: {
+                  parent: request.parent,
+                  prompt: request.prompt,
+                  ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+                  ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
+                  ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
+                  ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
+                  ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
+                },
+                signal: request.signal,
+                delivery: 'caller',
+              })
+              return { id: activation.childId, result: activation.result, dispose: () => activation.dispose() }
+            })
+          },
         }, { ...policy, maxWorkers: requestedCap }, {
           objective, plan, planOnly: args.planOnly ?? false, executeWrites: args.executeWrites ?? false,
           ...(args.runId === undefined ? {} : { runId: OrchestrationRunId(args.runId) }), ...(resumeContext === undefined ? {} : { resumeContext }),

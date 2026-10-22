@@ -4,7 +4,7 @@ import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
-import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
+import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OrchestrationResult, PlannedTask, TaskPlan, TaskState, WorkerReport } from './types.js'
 import { readPlan, readWorker, readReview, record, positiveInteger, compactReport } from './validation.js'
@@ -63,8 +63,6 @@ export interface RunnerHost {
   parent: Agent
   signal: AbortSignal
   start: (request: SubagentStartRequest, task: PlannedTask) => Promise<SubagentRun>
-  readOnlyFilter: ToolRestriction
-  writeFilter?: ToolRestriction
   childIsLive: (id: SessionId) => boolean
   failureDetail?: (id: SessionId) => string | undefined
 }
@@ -239,7 +237,6 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
         agentOptions: { maxTokens: task.outputReserveTokens!, ...(model === undefined
           ? policy.subagentModel === undefined ? {} : { model: policy.subagentModel }
           : { ...model, reasoningEffort: model.reasoningEffort }) },
-        toolFilter: task.readOnly ? host.readOnlyFilter : host.writeFilter,
       }, task)
       state.childId = run.id; save()
       const settled = await run.result

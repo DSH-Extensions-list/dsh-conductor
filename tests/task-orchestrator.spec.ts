@@ -5,7 +5,7 @@ import { ResourceManager, estimateInputTokens } from '../src/resource-manager.ts
 import { CONTEXT_TIERS, estimateTaskBudget, packReadyTasks, selectContextTier } from '../src/adaptive.ts'
 
 describe('DSH Task Orchestrator', () => {
-  it('declares DSH 0.2.0-rc.2 compatibility for every required runtime package', () => {
+  it('declares DSH 0.2.1 compatibility for every required runtime package', () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: Record<string, string>
       dependencies: Record<string, string>
@@ -20,7 +20,7 @@ describe('DSH Task Orchestrator', () => {
       '@deepseek-ai/dsh-util-values',
       '@deepseek-ai/dsh-workflow',
     ]) {
-      expect(manifest.peerDependencies[name]).toContain('^0.2.0-rc.2')
+      expect(manifest.peerDependencies[name]).toBe('>=0.2.1-rc.2 <0.2.2')
     }
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('^3.18.4')
     expect(manifest).not.toHaveProperty('packageManager')

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.1 — 2026-10-22
+
+- Target DeepSeek Harness `0.2.1-rc.2` through the `0.2.1` line and stop advertising older incompatible host APIs.
+- Migrate child startup to `startActivation()` and apply read/write tool restrictions through each child agent's scoped tool runtime, matching the DSH 0.2.1 Subagent contract.
+- Mount the new working-directory prerequisite in production-loop tests and preserve precise context-budget failure diagnostics across child teardown.
+- Remove the obsolete `dsh-invariants` dependency line and adopt the reviewed DSH pnpm build policy for `koffi`.
+- Activation-test the packed plugin in an isolated DSH `0.2.1-rc.2` Web profile.
 - Apply saved orchestrator model and reasoning when a new Web Session starts, show the selection in the chat, and preserve a manual change made before the first response.
 
 ## 1.2.0 — 2026-09-30

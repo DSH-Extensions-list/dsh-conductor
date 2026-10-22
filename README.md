@@ -17,10 +17,10 @@ Author: Hasan Aghayev · License: MIT
 
 ## Installation
 
-Version 1.2.0 targets the DSH 0.2 API line and is tested against `0.2.0-rc.2`. Install the versioned release package into a DSH profile:
+Version 1.2.1 targets the DSH 0.2.1 API line and is activation-tested against `0.2.1-rc.2`. The supported host range is `>=0.2.1-rc.2 <0.2.2`. Install the versioned release package into a DSH profile:
 
 ```sh
-dsh plugin --profile web add https://github.com/hasan-aghayev/dsh-task-orchestrator/releases/download/v1.2.0/dsh-task-orchestrator-1.2.0.tgz
+dsh plugin --profile web add https://github.com/hasan-aghayev/dsh-task-orchestrator/releases/download/v1.2.1/dsh-task-orchestrator-1.2.1.tgz
 ```
 
 Use your profile name in place of `web`. The same command accepts a locally built tarball. To install the latest source from the default branch, use:

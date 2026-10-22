@@ -76,7 +76,7 @@ describe('DSH production runtime', () => {
       }
     }
     try {
-      await mountAgentLoopTestDependencies(ctx, { tools: { mode: 'native' } })
+      await mountAgentLoopTestDependencies(ctx, { tools: { mode: 'native' }, workingDirectory: true })
       await ctx.plugin(Subagents)
       await ctx.plugin(Spawn, { providerName: 'spawn' })
       await ctx.plugin(Todo, { allowParallelInProgress: true })

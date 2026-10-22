@@ -36,7 +36,7 @@ function fixture(seed?: ReturnType<Session['snapshotEvents']>, signal = new Abor
   const waiters: Array<{ count: number; resolve: () => void }> = []
   let disposed = 0
   const host: RunnerHost = {
-    parent: { session } as never, signal, readOnlyFilter: { allow: ['read', 'grep'] }, writeFilter: { deny: ['subagent'] }, childIsLive: () => false,
+    parent: { session } as never, signal, childIsLive: () => false,
     start: async (request, task) => {
       const result = deferred<unknown>()
       starts.push({ id: task.id, request, result })
@@ -89,7 +89,6 @@ describe('saved TODO execution', () => {
     expect(f.disposed).toBe(5)
     expect(f.state().todos.every(todo => todo.status === 'completed')).toBe(true)
     expect(f.starts[0].request.agentOptions?.maxTokens).toBe(2_048)
-    expect(f.starts[0].request.toolFilter).toEqual({ allow: ['read', 'grep'] })
     expect(f.starts[0].request.prompt[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Task: one.') })
     // The native log reader accepts checkpoint metadata without a custom required event type.
     expect(Session.create('restored' as never, f.session.snapshotEvents()).snapshotEvents().slice(0, f.session.snapshotEvents().length)).toEqual(f.session.snapshotEvents())
