@@ -18,7 +18,8 @@ import { ResourceManager, validateContextConcurrency } from './resource-manager.
 import { readPlan, positiveInteger } from './validation.js'
 import { runPlan, OrchestrationRunId, type RunnerPolicy, type Checkpoint } from './runner.js'
 import { TOOL_PLAN_SCHEMA } from './schemas.js'
-import type { PlannedTask } from './types.js'
+import { formatTaskModel } from './model-label.js'
+import type { PlannedTask, TaskModel } from './types.js'
 import { ROLE_MODEL_FIELDS, resolveRoleModels, resolveChildModels, installParentModelPolicy, type RoleModelValues } from './model-policy.js'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -259,14 +260,16 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
   resolvePolicy()
-  interface ChildLaunchContext { task: PlannedTask; restriction?: ToolRestriction }
+  interface ChildLaunchContext { task: PlannedTask; restriction?: ToolRestriction; onModel?: (model: TaskModel) => void }
   const budgetContext = new AsyncLocalStorage<ChildLaunchContext>()
   const budgets = new Map<SessionId, PlannedTask>()
+  const modelObservers = new Map<SessionId, (model: TaskModel) => void>()
   const budgetFailures = new Map<SessionId, string>()
   ctx.on('agent/created', ({ agent }) => {
     const launch = budgetContext.getStore()
     if (launch !== undefined && agent.session.header.origin === 'subagent') {
       budgets.set(agent.session.id, launch.task)
+      if (launch.onModel !== undefined) modelObservers.set(agent.session.id, launch.onModel)
       if (launch.restriction !== undefined) agent.ctx.tools.restrict(launch.restriction)
       else {
         agent.session.append('sandbox/mode', { mode: 'danger-full-access', source: 'delegation' })
@@ -278,6 +281,7 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.on('agent/disposed', ({ agent }) => {
     budgets.delete(agent.session.id)
+    modelObservers.delete(agent.session.id)
     const running = runs.active(agent.id)
     if (running !== undefined) runs.cancel(agent.id, running.runId)
   })
@@ -296,6 +300,8 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.effect(() => () => resources.close())
   ctx.on('llm/stream', (options, next) => {
+    if (options.sessionId !== undefined) modelObservers.get(options.sessionId)?.({ provider: options.provider, model: options.model,
+      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) })
     // Only owned worker streams enter this queue. The lead and reviewer remain independent.
     const task = options.sessionId === undefined ? undefined : budgets.get(options.sessionId)
     return task !== undefined && task.role !== 'reviewer' && (get('scheduledProviders').length === 0 || get('scheduledProviders').includes(options.provider))
@@ -383,15 +389,17 @@ export function apply(ctx: Context, config: Config): void {
         },
         childIsLive: id => ctx.agents.get(id) !== undefined,
         failureDetail: id => { const detail = budgetFailures.get(id); budgetFailures.delete(id); return detail },
-        start: async (request, task) => {
+        start: async (request, task, onModel) => {
           const restriction: ToolRestriction | undefined = get('fullAccessWorkers') ? undefined : task.readOnly
             ? { allow: allowed } : deniedDelegation.length === 0 ? { allow: [...ctx.tools.schemas(parent).map(tool => tool.name)] } : { deny: deniedDelegation }
           // This permit covers child lifetime, not merely individual model streams.
           const release = request.agentOptions?.provider === 'bharatcode' ? await bharatcodeLane.acquire(request.signal) : () => {}
           try {
-            return await budgetContext.run({ task, restriction }, async () => {
+            return await budgetContext.run({ task, restriction, onModel }, async () => {
               const activation = await ctx.subagents.startActivation({
-                provider: get('subagentProvider'), label: request.label ?? `${task.owner}: ${task.title}`,
+                provider: get('subagentProvider'), label: request.agentOptions?.provider && request.agentOptions.model
+                  ? `${task.owner} · ${formatTaskModel({ provider: request.agentOptions.provider, model: request.agentOptions.model, reasoningEffort: request.agentOptions.reasoningEffort })} · ${task.title}`
+                  : request.label ?? `${task.owner}: ${task.title}`,
                 request: { parent: request.parent, prompt: request.prompt,
                   ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
                   ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),

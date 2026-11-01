@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+Show provider/model/reasoning in native Fleet names and task progress. Persist assigned models before dispatch and observed request models after execution begins. Preserve completed model history and compatibility with older checkpoints.
+
 ## 0.1.0
 
 Initial Conductor fork: owned background runs, responsive coordinator conversation, globally serialized BharatCode child lifetimes, status/message/cancel tools, durable checkpoints, one-million-token context support, declared output allowance, full-access defaults, native model/reasoning selectors, and structured-output continuation compatibility.

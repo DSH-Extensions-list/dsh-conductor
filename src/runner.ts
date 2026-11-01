@@ -6,8 +6,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
-import type { OrchestrationResult, PlannedTask, TaskPlan, TaskState, WorkerReport } from './types.js'
+import type { OrchestrationResult, PlannedTask, TaskPlan, TaskState, WorkerReport, TaskModel } from './types.js'
 import { readPlan, readWorker, readReview, record, positiveInteger, compactReport } from './validation.js'
+import { formatTaskModel } from './model-label.js'
 import { WORKER_SCHEMA, REVIEW_SCHEMA } from './schemas.js'
 import type { ContextConcurrencyLimit } from './resource-manager.js'
 
@@ -62,7 +63,7 @@ export interface RunRequest {
 export interface RunnerHost {
   parent: Agent
   signal: AbortSignal
-  start: (request: SubagentStartRequest, task: PlannedTask) => Promise<SubagentRun>
+  start: (request: SubagentStartRequest, task: PlannedTask, onModel?: (model: TaskModel) => void) => Promise<SubagentRun>
   childIsLive: (id: SessionId) => boolean
   failureDetail?: (id: SessionId) => string | undefined
   onCheckpoint?: (checkpoint: Checkpoint) => void
@@ -75,7 +76,7 @@ export function projectTodo(plan: TaskPlan, states: readonly TaskState[]): TodoI
   return plan.tasks.map(task => {
     const state = states.find(item => item.taskId === task.id)!
     return {
-      content: `[${task.id}] ${task.title} — ${task.owner} (${state.reason.length > 300 ? state.reason.slice(0, 299) + '…' : state.reason})`,
+      content: `[${task.id}] ${task.title} — ${task.owner}${state.model === undefined ? '' : ` · ${formatTaskModel(state.model)}${state.modelSource === 'request' ? '' : ' (assigned)'}`} (${state.reason.length > 300 ? state.reason.slice(0, 299) + '…' : state.reason})`,
       status: state.state === 'DONE' ? 'completed' : state.state === 'ACTIVE' ? 'in_progress' : 'pending',
     }
   })
@@ -109,7 +110,18 @@ function readCheckpoint(value: unknown, policy: RunnerPolicy): Checkpoint {
     const task = plan.tasks.find(task => task.id === item.taskId)
     const state = ['CREATED', 'QUEUED', 'ACTIVE', 'WAITING', 'DONE', 'FAILED', 'CANCELLED', 'PARKED'].find(state => state === item.state) as TaskState['state'] | undefined
     if (task === undefined || state === undefined || typeof item.reason !== 'string' || typeof item.attempts !== 'number' || !Number.isSafeInteger(item.attempts) || item.attempts < 0) throw new TypeError('Malformed checkpoint task state')
-    return { taskId: task.id, owner: task.owner, state, attempts: item.attempts, reason: item.reason, ...(typeof item.childId === 'string' ? { childId: item.childId as SessionId } : {}) }
+    let model: TaskModel | undefined
+    if (item.model !== undefined) {
+      const rawModel = record(item.model)
+      if (typeof rawModel.provider !== 'string' || !rawModel.provider.trim() || typeof rawModel.model !== 'string' || !rawModel.model.trim()
+        || rawModel.reasoningEffort !== undefined && (typeof rawModel.reasoningEffort !== 'string' || !rawModel.reasoningEffort.trim())) throw new TypeError('Malformed checkpoint model')
+      model = { provider: rawModel.provider, model: rawModel.model, ...(typeof rawModel.reasoningEffort === 'string' ? { reasoningEffort: rawModel.reasoningEffort } : {}) }
+    }
+    if (item.modelSource !== undefined && (!model || !['assigned','request'].includes(String(item.modelSource)))) throw new TypeError('Malformed checkpoint model source')
+    return { taskId: task.id, owner: task.owner, state, attempts: item.attempts, reason: item.reason,
+      ...(typeof item.childId === 'string' ? { childId: item.childId as SessionId } : {}),
+      ...(model === undefined ? {} : { model, modelSource: item.modelSource === 'request' ? 'request' as const : 'assigned' as const }) }
+
   })
   if (taskStates.length !== plan.tasks.length || new Set(taskStates.map(state => state.taskId)).size !== plan.tasks.length) throw new TypeError('Checkpoint task states do not match the plan')
   const workers = result.workers.map((value: unknown) => {
@@ -167,11 +179,14 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
   for (const [id, context] of Object.entries(extra)) {
     if (!request.plan.tasks.some(task => task.id === id) || typeof context !== 'string' || context.trim().length === 0 || context.length > policy.maxHandoffChars) throw new TypeError(`Invalid resumeContext for ${id}`)
   }
+  const modelFor = (task: PlannedTask): TaskModel | undefined => task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel
   const checkpoint: Checkpoint = previous === undefined ? {
     version: 1, runId: OrchestrationRunId(randomUUID()), objective: request.objective,
     result: { status: 'blocked', summary: 'Plan saved; tasks are waiting to start.', plan: request.plan,
       workers: [], review: null, agentsStarted: 0,
-      taskStates: request.plan.tasks.map(task => ({ taskId: task.id, owner: task.owner, state: 'QUEUED', attempts: 0, reason: task.dependsOn.length === 0 ? 'queued' : `waiting for: ${task.dependsOn.join(', ')}` })),
+      taskStates: request.plan.tasks.map(task => ({ taskId: task.id, owner: task.owner, state: 'QUEUED', attempts: 0,
+        reason: task.dependsOn.length === 0 ? 'queued' : `waiting for: ${task.dependsOn.join(', ')}`,
+        ...(modelFor(task) === undefined ? {} : { model: { ...modelFor(task)! }, modelSource: 'assigned' as const }) })),
     },
   } : structuredClone(previous)
   const result = checkpoint.result
@@ -186,6 +201,14 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
     if ((extra[state.taskId] !== undefined || changedTasks.has(state.taskId)) && state.state !== 'DONE') {
       state.state = 'QUEUED'; state.reason = 'new information received'
     }
+  }
+  // Never-started assignments describe this invocation, while attempted/completed
+  // tasks retain their recorded request history until a new attempt actually starts.
+  for (const state of result.taskStates) {
+    if (state.attempts !== 0 || state.state === 'DONE') continue
+    const assigned = modelFor(result.plan.tasks.find(task => task.id === state.taskId)!)
+    if (assigned === undefined) { delete state.model; delete state.modelSource }
+    else { state.model = { ...assigned }; state.modelSource = 'assigned' }
   }
   const save = (): void => {
     // Native TODO and plugin checkpoint share one existing event. Older TODO readers select `todos` and retain the extra JSON data.
@@ -230,6 +253,9 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
     try {
       if (state.attempts >= policy.maxAttemptsPerTask || result.agentsStarted >= policy.maxChildStarts) throw new Error('Child start/attempt budget exhausted; parent must revise the work')
       const prompt = promptFor(task)
+      const assigned = modelFor(task)
+      if (assigned !== undefined) { state.model = { ...assigned }; state.modelSource = 'assigned' }
+      else { delete state.model; delete state.modelSource }
       state.state = 'ACTIVE'; state.reason = 'running'; state.attempts += 1; result.agentsStarted += 1; save()
       const schema: ObjectJsonSchema = task.role === 'reviewer' ? REVIEW_SCHEMA : { ...WORKER_SCHEMA, properties: { ...WORKER_SCHEMA.properties, taskId: { type: 'string', const: task.id } } }
       const model = task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel
@@ -239,7 +265,11 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
         agentOptions: { maxTokens: task.outputReserveTokens!, ...(model === undefined
           ? policy.subagentModel === undefined ? {} : { model: policy.subagentModel }
           : { ...model, reasoningEffort: model.reasoningEffort }) },
-      }, task)
+      }, task, observed => {
+        if (state.modelSource === 'request' && state.model?.provider === observed.provider && state.model.model === observed.model
+          && state.model.reasoningEffort === observed.reasoningEffort) return
+        state.model = { ...observed }; state.modelSource = 'request'; save()
+      })
       state.childId = run.id; save()
       const settled = await run.result
       if (signal.aborted || (settled.stopReason !== 'completed' && !(settled.stopReason === 'max-tokens' && settled.structured !== undefined))) {

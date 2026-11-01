@@ -64,6 +64,57 @@ function fixture(seed?: ReturnType<Session['snapshotEvents']>, signal = new Abor
 }
 
 describe('saved TODO execution', () => {
+  it('refreshes never-started model assignments when a saved plan is resumed with a different route', async () => {
+    const f = fixture(), graph = plan(['one','two'])
+    const saved = await runPlan(f.host, { ...policy, workerModel: { provider: 'provider-a', model: 'model-a' } }, { objective: 'Plan', plan: graph, planOnly: true, executeWrites: false })
+    const resumed = await runPlan(f.host, { ...policy, workerModel: { provider: 'provider-b', model: 'model-b' } }, { objective: 'Plan', plan: graph, planOnly: true, executeWrites: false, runId: saved.runId })
+    expect(resumed.taskStates?.find(task => task.taskId === 'one')).toMatchObject({ model: { provider: 'provider-b', model: 'model-b' }, modelSource: 'assigned', attempts: 0 })
+    expect(f.state().todos[0].content).toContain('provider-b/model-b')
+    expect(f.starts).toHaveLength(0)
+  })
+
+  it('keeps historical model unknown when a legacy completed checkpoint has no model metadata', async () => {
+    const f = fixture(), graph = plan(['one','two'])
+    const pending = runPlan(f.host, policy, { objective: 'Legacy', plan: graph, planOnly: false, executeWrites: false })
+    await f.started(2); f.finish('one'); f.finish('two'); await f.started(3); f.finish('review')
+    const done = await pending
+    const restored = fixture(f.session.snapshotEvents())
+    const replay = await runPlan(restored.host, { ...policy, workerModel: { provider: 'new-provider', model: 'new-model' } }, { objective: 'Legacy', plan: graph, planOnly: false, executeWrites: false, runId: done.runId })
+    expect(replay.taskStates?.every(task => task.model === undefined && task.modelSource === undefined)).toBe(true)
+    expect(restored.starts).toHaveLength(0)
+  })
+
+  it('shows captured worker and reviewer assignments in queued TODO before any child starts', async () => {
+    const f = fixture()
+    const selected = { ...policy, workerModel: { provider: 'bharatcode', model: 'deepseek-v4.1-flash' }, reviewerModel: { provider: 'codex', model: 'gpt-6.1-sol', reasoningEffort: 'medium' as never } }
+    const saved = await runPlan(f.host, selected, { objective: 'Check', plan: plan(['one','two']), planOnly: true, executeWrites: false })
+    expect(saved.taskStates?.find(t => t.taskId === 'one')).toMatchObject({ model: { provider: 'bharatcode', model: 'deepseek-v4.1-flash' }, modelSource: 'assigned' })
+    expect(saved.taskStates?.find(t => t.taskId === 'review')).toMatchObject({ model: { provider: 'codex', model: 'gpt-6.1-sol', reasoningEffort: 'medium' }, modelSource: 'assigned' })
+    expect(f.state().todos[0].content).toContain('bharatcode/deepseek-v4.1-flash')
+    expect(f.state().todos.at(-1)?.content).toContain('codex/gpt-6.1-sol · medium')
+    expect(f.starts).toHaveLength(0)
+  })
+
+  it('records the actual request model and preserves it when a completed run is resumed under different settings', async () => {
+    const f = fixture(), graph = plan(['one','two'])
+    const original = f.host.start
+    f.host.start = async (request, task, onModel) => {
+      const run = await original(request, task)
+      if (task.id === 'one') onModel?.({ provider: 'bharatcode', model: 'deepseek-v4.1-pro', reasoningEffort: 'high' })
+      return run
+    }
+    const selected = { ...policy, workerModel: { provider: 'bharatcode', model: 'deepseek-v4.1-flash' }, reviewerModel: { provider: 'codex', model: 'gpt-6.1-sol' } }
+    const pending = runPlan(f.host, selected, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false })
+    await f.started(2)
+    expect(f.state().todos[0].content).toContain('bharatcode/deepseek-v4.1-pro · high')
+    f.finish('one'); f.finish('two'); await f.started(3); f.finish('review')
+    const done = await pending
+    expect(done.taskStates?.find(t => t.taskId === 'one')).toMatchObject({ model: { provider: 'bharatcode', model: 'deepseek-v4.1-pro', reasoningEffort: 'high' }, modelSource: 'request' })
+    const replay = await runPlan(f.host, { ...selected, workerModel: { provider: 'other', model: 'changed' } }, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false, runId: done.runId })
+    expect(replay.taskStates?.find(t => t.taskId === 'one')).toMatchObject({ model: { provider: 'bharatcode', model: 'deepseek-v4.1-pro' }, modelSource: 'request' })
+    expect(f.starts).toHaveLength(3)
+  })
+
   it('saves assigned TODO before any child and runs four tasks as two active, two queued', async () => {
     const f = fixture()
     const pending = runPlan(f.host, policy, { objective: 'Check project', plan: plan(), planOnly: false, executeWrites: false })

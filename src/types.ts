@@ -64,6 +64,13 @@ export interface WorkerNeed {
   requestedContextTokens?: number
 }
 
+/** Provider/model attached to an assigned task or an observed model request. */
+export interface TaskModel {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
 /** Durable state snapshot for one logical task. */
 export interface TaskState {
   taskId: string
@@ -72,6 +79,8 @@ export interface TaskState {
   owner: string
   reason: string
   childId?: SessionId
+  model?: TaskModel
+  modelSource?: 'assigned' | 'request'
 }
 
 /** The strict result expected from the planning agent. */

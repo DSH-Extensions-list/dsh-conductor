@@ -1,9 +1,9 @@
-# Verification — Conductor 0.1.0
+# Verification — Conductor 0.1.1
 
 Verified on 1 November 2026 with Node.js24 and DSH 0.2.1-rc.2 development dependencies, in an isolated repository.
 
 - TypeScript no-emit check passed.
-- Complete Vitest suite: **102 tests passed across 13 files**.
+- Complete Vitest suite: **106 tests passed across 13 files**.
 - Host/declaration build and browser settings bundle passed.
 - Independent source review identified a terminal-notice re-planning loop and untracked foreground lifecycle; both were reproduced/fixed and covered before packaging. A cancellation display envelope was also made consistent.
 
@@ -16,3 +16,5 @@ Continuation tests adapt the installed max-tokens-continue hook in a test-local 
 The default million-token budget and complete configured output allowance are verified in actual constructed requests/checkpoints, including model-authored attempts to reduce task budgets. This establishes configuration/transport behavior; no million-token paid request or backend maximum-output probe was sent.
 
 The user's running DSH process, installed extensions and active sessions were not modified, restarted or reloaded during this build. Live activation with real models remains a separate acceptance step when existing work is idle. Scripted adapters do not establish arbitrary-model reasoning quality, universal delegation reliability, or correctness of future generated changes.
+
+Model visibility regressions verify queued assignments, observed request route changes, native child labels, completed-history preservation after selector changes, and legacy checkpoints that lack model evidence.

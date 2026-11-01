@@ -12,6 +12,7 @@ The package preset selects **Codex / GPT-6.1 Sol / Medium** for the coordinator 
 - Exactly one Conductor-managed BharatCode child is admitted at a time across conversations in this plugin instance. The permit lasts through child disposal, not just one API response. Extra tasks queue. The lead and Codex reviewer stay outside the worker queue.
 - DeepSeek workers default to **1,000,000 combined context tokens** and the selected adapter's complete configured per-response output allowance. The current BharatCode declaration is **32,000 output tokens**, not an independently measured backend maximum. Conductor overrides small model-authored task budgets with the saved full-budget controls.
 - Full-access workers, including reviewers, receive all tools available in their preset plus `danger-full-access` / `approval: never`. Review-only assignments are instructions, not filesystem confinement. Nested delegation tools are guarded so they cannot bypass the single-child queue. Other plugins and external processes are outside that queue.
+- Native Fleet/subagent names include the selected provider, model and reasoning level. Queued task rows mark that selection as assigned; once a model request starts, TODO/status records its actual route. Completed tasks retain their recorded model even after selector changes, and old checkpoints without model evidence stay unknown.
 - Final review is required by default. Success requires every task's structured evidence and an approved review. Failures, cancellation and missing context are reported with partial evidence.
 
 Context capacity includes input, output and overhead; a million-token window does not mean a million input tokens plus another full output allowance. Conductor does not pad prompts to fill the window or invent capacity above the selected provider's metadata. No aggregate token-spend cap is added; task/start/retry and context controls remain explicit settings.
@@ -21,7 +22,7 @@ Context capacity includes input, output and overhead; a million-token window doe
 Conductor targets **DSH >=0.2.1-rc.2 <0.2.2**, Node.js >=22.19. Build a tarball or use a release asset. In a CLI-managed profile:
 
 ```sh
-dsh plugin --profile web add ./dsh-conductor-0.1.0.tgz
+dsh plugin --profile web add ./dsh-conductor-0.1.1.tgz
 ```
 
 For an Electron-managed desktop profile, use its plugin manager instead of modifying the profile package files directly. Installing/replacing plugins can unload code: wait until existing runs are finished. Disable the previous orchestration extension before enabling Conductor so two planning guards do not compete. Conductor's manifest is additive and does not disable any standard or third-party rows itself.
