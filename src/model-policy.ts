@@ -105,7 +105,7 @@ export function installParentModelPolicy(ctx: Context, read: () => RoleModels): 
       state.key = JSON.stringify(selected)
       states.set(agent, state)
     } catch (error) {
-      ctx.logger.warn(`task-orchestrator: could not apply saved parent model to new Session: ${String(error)}`)
+      ctx.logger.warn(`conductor: could not apply saved parent model to new Session: ${String(error)}`)
     }
   })
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {

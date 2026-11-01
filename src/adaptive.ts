@@ -1,7 +1,7 @@
 /**
  * Pure planning helpers for the adaptive worker scheduler.
  *
- * The helpers deliberately use estimates only for admission. NInfer remains
+ * The helpers deliberately use estimates only for admission. The selected provider remains
  * the authority for token counts, memory placement, and whether a continuation
  * was restored from Device or Host memory.
  */
@@ -12,7 +12,7 @@ import type { PlannedTask } from './types.js'
 const STANDARD_CONTEXT_TIERS = [8_192, 16_384, 24_576, 32_768, 49_152, 65_536, 81_920, 98_304] as const
 
 /** Highest context budget accepted by the worker planner. */
-export const MAX_CONTEXT_TOKENS = 150_000
+export const MAX_CONTEXT_TOKENS = 1_000_000
 
 /** Context budgets offered to a worker. The value is a logical ceiling. */
 export const CONTEXT_TIERS: readonly number[] = [

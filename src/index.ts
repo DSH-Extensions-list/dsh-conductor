@@ -3,29 +3,34 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createUserMessage, type ContentBlock, type ContextFormed, type UserMessage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import type {} from '@deepseek-ai/dsh-permission-presets'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
 import { defineTool, type ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MAX_CONTEXT_TOKENS } from './adaptive.js'
+import { BackgroundRuns, type BackgroundSnapshot } from './background-runs.js'
+import { ChildLane } from './child-lane.js'
+import { resolveWorkerBudget } from './budget-policy.js'
 import { ResourceManager, validateContextConcurrency } from './resource-manager.js'
 import { readPlan, positiveInteger } from './validation.js'
-import { runPlan, OrchestrationRunId, type RunnerPolicy } from './runner.js'
+import { runPlan, OrchestrationRunId, type RunnerPolicy, type Checkpoint } from './runner.js'
 import { TOOL_PLAN_SCHEMA } from './schemas.js'
 import type { PlannedTask } from './types.js'
 import { ROLE_MODEL_FIELDS, resolveRoleModels, resolveChildModels, installParentModelPolicy, type RoleModelValues } from './model-policy.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    'task-orchestrator': { kind: 'task-orchestrator' } & ContextFormed
+    'conductor': { kind: 'conductor' } & ContextFormed
   }
 }
 
 /** Plugin identifier used by the profile loader. */
-export const name = 'task-orchestrator'
+export const name = 'conductor'
 /** Existing services used without changing the agent loop. */
-export const inject = ['tools', 'subagents', 'systemPrompt', 'agents']
+export const inject = ['tools', 'subagents', 'systemPrompt', 'agents', 'llm']
 
 /** Automatic orchestration mode. */
 export type OrchestrationMode = 'off' | 'suggest' | 'hybrid' | 'auto'
@@ -37,19 +42,21 @@ export interface ContextConcurrency {
 }
 
 const DEFAULT_CONTEXT_CONCURRENCY: readonly ContextConcurrency[] = [
-  { maxContextTokens: 8_192, maxActiveGenerations: 2 },
-  { maxContextTokens: 16_384, maxActiveGenerations: 2 },
-  { maxContextTokens: 24_576, maxActiveGenerations: 2 },
-  { maxContextTokens: 32_768, maxActiveGenerations: 2 },
-  { maxContextTokens: 49_152, maxActiveGenerations: 2 },
-  { maxContextTokens: 65_536, maxActiveGenerations: 1 },
-  { maxContextTokens: 81_920, maxActiveGenerations: 1 },
-  { maxContextTokens: 98_304, maxActiveGenerations: 1 },
   { maxContextTokens: MAX_CONTEXT_TOKENS, maxActiveGenerations: 1 },
 ]
 
 /** Deployment policy for automatic task orchestration. */
 export interface ConfigValues extends RoleModelValues {
+  /** Return immediately while an owned task run continues. */
+  backgroundMode?: boolean
+  /** Give workers all capabilities available in their selected preset. */
+  fullAccessWorkers?: boolean
+  /** Default combined worker context ceiling; exact route capacity remains authoritative. */
+  workerContextTokens?: number
+  /** Zero resolves the provider-declared per-request output allowance. */
+  workerOutputTokens?: number
+  /** Advanced compatibility option: accept per-task reductions instead of global full budgets. */
+  respectTaskBudgets?: boolean
   /** Disable automation, show a plan first, or execute complex requests automatically. */
   mode?: OrchestrationMode
   /** Minimum deterministic complexity score that starts planning. */
@@ -74,7 +81,7 @@ export interface ConfigValues extends RoleModelValues {
   maxHandoffChars?: number
   /** Maximum characters added to the parent model's current request. */
   maxResultChars?: number
-  /** Maximum model streams consumed at once by the local NInfer service. */
+  /** Maximum simultaneous owned worker model streams. */
   maxActiveGenerations?: number
   /** Per-request concurrency ceilings selected by estimated input context. */
   concurrencyByContext?: ContextConcurrency[]
@@ -107,7 +114,7 @@ export interface ConfigValues extends RoleModelValues {
 }
 
 /** Fields editable through the profile Settings page without unloading active runs. */
-export type LiveSetting = 'mode' | 'maxWorkers' | 'maxConcurrentAgents' | 'requireReview'
+export type LiveSetting = 'backgroundMode' | 'fullAccessWorkers' | 'workerContextTokens' | 'workerOutputTokens' | 'mode' | 'maxWorkers' | 'maxConcurrentAgents' | 'requireReview'
   | 'maxActiveGenerations' | 'maxChildStarts' | 'maxAttemptsPerTask' | 'concurrencyByContext'
   | 'hardContextTokens' | 'totalContextTokens'
   | typeof ROLE_MODEL_FIELDS[number]
@@ -119,7 +126,12 @@ export type Config = Omit<ConfigValues, LiveSetting> & {
 
 /** Schemastery configuration for the task orchestrator plugin. */
 export const Config: z<ConfigValues, Config> = z.object({
-  mode: z.union(['off', 'suggest', 'hybrid', 'auto']).default('hybrid').volatile(),
+  respectTaskBudgets: z.boolean().default(false),
+  backgroundMode: z.boolean().default(true).volatile(),
+  fullAccessWorkers: z.boolean().default(true).volatile(),
+  workerContextTokens: z.number().step(1).min(1).max(1_000_000).default(1_000_000).volatile(),
+  workerOutputTokens: z.number().step(1).min(0).max(1_000_000).default(0).volatile(),
+  mode: z.union(['off', 'suggest', 'hybrid', 'auto']).default('auto').volatile(),
   minComplexityScore: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(55),
   subagentProvider: z.string().default('spawn'),
   orchestratorProvider: z.string().default('').volatile(),
@@ -131,30 +143,30 @@ export const Config: z<ConfigValues, Config> = z.object({
   reviewerProvider: z.string().default('').volatile(),
   reviewerModel: z.string().default('').volatile(),
   reviewerReasoningEffort: z.string().default('').volatile(),
-  preferredWorkers: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(2),
+  preferredWorkers: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1),
   maxWorkers: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(6).volatile(),
   maxTotalAgents: z.number().step(1).min(1).max(6).default(6),
-  maxConcurrentAgents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(2).volatile(),
+  maxConcurrentAgents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
   allowWrites: z.boolean().default(false),
   allowParallelWrites: z.boolean().default(false),
   requireReview: z.boolean().default(true).volatile(),
-  maxHandoffChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(16_384),
-  maxResultChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(16_384),
-  maxActiveGenerations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(2).volatile(),
+  maxHandoffChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(262_144),
+  maxResultChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(262_144),
+  maxActiveGenerations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
   concurrencyByContext: z.array(z.object({
     maxContextTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     maxActiveGenerations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
   })).default([...DEFAULT_CONTEXT_CONCURRENCY]).volatile(),
-  hardContextTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(65_536).volatile(),
+  hardContextTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(0).volatile(),
   priorityAgingMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(30_000),
-  totalContextTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(98_304).volatile(),
-  contextCompactionChars: z.number().step(1).min(128).max(Number.MAX_SAFE_INTEGER).default(4_096),
+  totalContextTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(0).volatile(),
+  contextCompactionChars: z.number().step(1).min(128).max(Number.MAX_SAFE_INTEGER).default(65_536),
   parentOrchestratorOnly: z.boolean().default(true),
-  minParallelTasks: z.number().step(1).min(1).max(6).default(2),
+  minParallelTasks: z.number().step(1).min(1).max(6).default(1),
   maxChildStarts: z.number().step(1).min(1).max(48).default(12).volatile(),
   maxAttemptsPerTask: z.number().step(1).min(1).max(8).default(2).volatile(),
   maxPlanningReminders: z.number().step(1).min(0).max(4).default(2),
-  readOnlyTools: z.array(z.string()).default(['read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'todo_write', 'list_skills', 'read_skill']),
+  readOnlyTools: z.array(z.string()).default(['read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'todo_write', 'list_skills', 'read_skill', 'skill']),
   scheduledProviders: z.array(z.string()).default([]),
   defaultOutputReserveTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(2_048),
   requestSafetyReserveTokens: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(1_024),
@@ -228,7 +240,7 @@ export function apply(ctx: Context, config: Config): void {
     const concurrencyByContext = get('concurrencyByContext').map(tier => ({ ...tier }))
     validateContextConcurrency(concurrencyByContext, get('hardContextTokens'))
     for (const [key, value] of Object.entries({ maxWorkers, maxConcurrentAgents, minParallelTasks, preferredWorkers: get('preferredWorkers'), maxChildStarts: get('maxChildStarts'), maxAttemptsPerTask: get('maxAttemptsPerTask') })) positiveInteger(value, key)
-    if (maxWorkers > 6 || maxConcurrentAgents > maxWorkers || minParallelTasks > maxConcurrentAgents || get('preferredWorkers') < minParallelTasks || get('preferredWorkers') > maxWorkers) throw new TypeError('Worker limits must allow the configured independent tasks and fit within six logical tasks')
+    if (maxWorkers > 6 || maxConcurrentAgents > maxWorkers || get('preferredWorkers') < minParallelTasks || get('preferredWorkers') > maxWorkers) throw new TypeError('Worker limits must allow the configured independent tasks and fit within six logical tasks')
     if (maxWorkers < minParallelTasks + (get('requireReview') ? 1 : 0)) throw new TypeError('maxWorkers must leave a slot for the required final reviewer')
     if (get('maxChildStarts') < maxWorkers) throw new TypeError('maxChildStarts must cover all logical tasks')
     if (!get('parentOrchestratorOnly')) throw new TypeError('parentOrchestratorOnly must be true; the parent owns planning')
@@ -247,7 +259,7 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
   resolvePolicy()
-  interface ChildLaunchContext { task: PlannedTask; restriction: ToolRestriction }
+  interface ChildLaunchContext { task: PlannedTask; restriction?: ToolRestriction }
   const budgetContext = new AsyncLocalStorage<ChildLaunchContext>()
   const budgets = new Map<SessionId, PlannedTask>()
   const budgetFailures = new Map<SessionId, string>()
@@ -255,11 +267,20 @@ export function apply(ctx: Context, config: Config): void {
     const launch = budgetContext.getStore()
     if (launch !== undefined && agent.session.header.origin === 'subagent') {
       budgets.set(agent.session.id, launch.task)
-      agent.ctx.tools.restrict(launch.restriction)
+      if (launch.restriction !== undefined) agent.ctx.tools.restrict(launch.restriction)
+      else {
+        agent.session.append('sandbox/mode', { mode: 'danger-full-access', source: 'delegation' })
+        agent.session.append('approval/policy', { policy: 'never', source: 'delegation' })
+        agent.session.append('permission/preset', { preset: 'danger-full-access' })
+      }
     }
     return undefined
   })
-  ctx.on('agent/disposed', ({ agent }) => { budgets.delete(agent.session.id) })
+  ctx.on('agent/disposed', ({ agent }) => {
+    budgets.delete(agent.session.id)
+    const running = runs.active(agent.id)
+    if (running !== undefined) runs.cancel(agent.id, running.runId)
+  })
   const resources = new ResourceManager({
     maxActiveGenerations: () => get('maxActiveGenerations'),
     hardContextTokens: () => get('hardContextTokens'), totalContextTokens: () => get('totalContextTokens'),
@@ -274,24 +295,30 @@ export function apply(ctx: Context, config: Config): void {
     },
   })
   ctx.effect(() => () => resources.close())
-  ctx.on('llm/stream', (options, next) => get('scheduledProviders').length === 0 || get('scheduledProviders').includes(options.provider) ? resources.stream(ctx, options, next) : next())
+  ctx.on('llm/stream', (options, next) => {
+    // Only owned worker streams enter this queue. The lead and reviewer remain independent.
+    const task = options.sessionId === undefined ? undefined : budgets.get(options.sessionId)
+    return task !== undefined && task.role !== 'reviewer' && (get('scheduledProviders').length === 0 || get('scheduledProviders').includes(options.provider))
+      ? resources.stream(ctx, options, next) : next()
+  })
   const turns = new WeakMap<Agent, TurnPolicy>()
-  const active = new WeakSet<Agent>()
+  const runs = new BackgroundRuns()
+  const bharatcodeLane = new ChildLane()
   const unload = new AbortController()
-  const inflight = new Set<Promise<unknown>>()
   ctx.effect(() => async () => {
     unload.abort()
     resources.close()
-    await Promise.allSettled(inflight)
+    bharatcodeLane.close()
+    await runs.shutdown()
   })
   const planningReminder = (): string => {
     const { minParallelTasks, maxConcurrentAgents } = resolvePolicy()
-    return `For substantive work, first prepare a concrete TODO plan with at least ${minParallelTasks} independent useful initial tasks, distinct assigned owner labels, dependencies and a final reviewer${get('requireReview') ? ' (required)' : ' when useful'}. Call task_orchestrate with this explicit plan. The plugin saves and displays TODO before starting children. At most ${maxConcurrentAgents} logical children run together, while the shared local scheduler admits at most ${get('maxActiveGenerations')} model streams INCLUDING the parent. Long contexts may require one stream. Other tasks remain queued. Do not delegate outside this plan. Short answers need no team. Use planOnly only when the human asked for planning or approval is still required. Existing user authorization is sufficient; do not ask again. Writes require configured permission or executeWrites=true when the human authorized implementation. If a child needs data, inspect its request, obtain the data and resume the saved runId with resumeContext. Do not claim blocked or failed work is complete.`
+    return `You coordinate substantive work through conductor_dispatch: save a concrete assigned plan with at least ${minParallelTasks} useful initial task(s), dependencies and a final reviewer${get('requireReview') ? ' (required)' : ''}. It returns an accepted run ID immediately in background mode; remain available to talk to the human. Only one BharatCode child is spawned at a time, remaining tasks queue, and your lead-model requests are not put in that worker queue. Let the configured workers implement, investigate and test, then use the independent review evidence before reporting success. Use conductor_status for saved progress/results, conductor_message to steer an active task, and conductor_cancel to stop a run. Terminal notices arrive automatically; do not poll repeatedly or claim completion while pending. Short questions need no team. A plan's budgets default to the selected model's declared capacity (DeepSeek 1,000,000 combined context) and full configured per-response output; omit small budget overrides. Full-access workers retain their preset tools while honoring task-scope instructions. Use planOnly only when planning or approval is actually required. Existing authorization is sufficient; do not ask again. For an authorized implementation use executeWrites=true. Resume a blocked run using its exact saved objective and plan plus resumeContext, preserving completed evidence.`
   }
-  ctx.systemPrompt.section({ name: 'tool:task-orchestrate', order: 150, text: () => get('mode') === 'off' ? 'Automatic orchestration is disabled. The parent may use task_orchestrate when the human explicitly requests a task team. Existing runs may finish.' : planningReminder() })
+  ctx.systemPrompt.section({ name: 'tool:conductor', order: 150, text: () => get('mode') === 'off' ? 'Automatic orchestration is disabled. The parent may use conductor_dispatch when the human explicitly requests a task team. Existing runs may finish.' : planningReminder() })
   ctx.tools.register(defineTool({
-    name: 'task_orchestrate',
-    description: 'Save the parent-authored assigned TODO graph, then execute isolated workers through a bounded queue. Explicit plan is mandatory. Return partial results and precise blockers to the parent. Resume by runId with newly supplied task data. Never generates a plan from keywords.',
+    name: 'conductor_dispatch',
+    description: 'Save an assigned task graph and dispatch background workers. Returns an accepted run ID without waiting, so the lead can keep talking. Completion or actionable failure is delivered later. Explicit plan required; resume preserves exact saved assignments.',
     parameters: {
       objective: { type: 'string', required: true, description: 'Concrete user objective.' },
       plan: { ...TOOL_PLAN_SCHEMA, required: true },
@@ -303,25 +330,41 @@ export function apply(ctx: Context, config: Config): void {
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: {
-        runId: { type: 'string', required: true }, agentsStarted: { type: 'integer', required: true }, result: { type: 'json', required: true },
+        runId: { type: 'string', required: true }, status: { type: 'string', required: true }, agentsStarted: { type: 'integer', required: true }, result: { type: 'json', required: true },
       } },
       render: (_args, value) => [{ type: 'text', text: boundResult(value.result, get('maxResultChars')) }],
     },
     async execute(args, exec) {
       const parent = exec.agent
       if (parent === undefined || parent.session.header.origin === 'subagent') throw new Error('Only the parent orchestrator may execute a task plan')
-      if (active.has(parent)) throw new Error('This parent already has an active task plan')
+      if (runs.active(parent.id) !== undefined) throw new Error('This conversation already has an active background run. Use conductor_status, conductor_message or conductor_cancel; ordinary conversation can continue.')
       const objective = args.objective.trim()
       if (objective.length === 0 || objective.length > get('maxHandoffChars')) throw new TypeError('objective must fit maxHandoffChars and be non-empty')
-      const plan = readPlan(args.plan, get('maxHandoffChars'))
+      const plan = readPlan(args.plan, get('maxHandoffChars'), true)
       const policy = resolvePolicy(parent)
+      const rawTasks = (args.plan as { tasks: Array<Record<string, unknown>> }).tasks
+      for (const task of plan.tasks) {
+        const model = task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel
+        if (model === undefined) throw new Error('Choose a worker model before dispatch')
+        const info = await ctx.llm.resolveModelInfo(model.provider, model.model, exec.signal)
+        const raw = rawTasks.find(item => item.id === task.id)!
+        const taskOverrides = get('respectTaskBudgets')
+        const budget = resolveWorkerBudget({ contextWindow: info.context?.contextWindow, defaultMaxTokens: info.defaultMaxTokens }, {
+          contextBudget: taskOverrides && raw.contextBudget !== undefined ? raw.contextBudget as number
+            : Math.min(get('workerContextTokens'), info.context?.contextWindow ?? get('workerContextTokens')),
+          ...(taskOverrides && raw.outputReserveTokens !== undefined ? { outputReserveTokens: raw.outputReserveTokens as number }
+            : get('workerOutputTokens') > 0 ? { outputReserveTokens: get('workerOutputTokens') } : {}),
+          ...(taskOverrides && raw.safetyReserveTokens !== undefined ? { safetyReserveTokens: raw.safetyReserveTokens as number } : {}),
+        })
+        Object.assign(task, budget)
+      }
       const maxWorkers = policy.maxWorkers
       const requestedCap = args.maxWorkers === undefined ? maxWorkers : positiveInteger(args.maxWorkers, 'maxWorkers')
       if (requestedCap > maxWorkers) throw new TypeError('maxWorkers exceeds the deployment ceiling')
       const provider = ctx.subagents.getProvider(get('subagentProvider'))
       if (provider === undefined || provider.inheritsParentContext || !provider.capabilities.outputSchema || !provider.capabilities.agentOptions) throw new Error('Provider must support fresh contexts, structured reports and output-token limits')
-      const allowed = get('readOnlyTools').filter(name => ctx.tools.get(name) !== undefined)
-      const deniedDelegation = ['task_orchestrate', 'subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].filter(name => ctx.tools.get(name) !== undefined)
+      const allowed = get('readOnlyTools').filter(name => ctx.tools.get(name, parent) !== undefined)
+      const deniedDelegation = ['conductor_dispatch', 'subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].filter(name => ctx.tools.get(name, parent) !== undefined)
       let resumeContext: Record<string, string> | undefined
       if (args.resumeContext !== undefined) {
         if (typeof args.resumeContext !== 'object' || args.resumeContext === null || Array.isArray(args.resumeContext)) throw new TypeError('resumeContext must be an object')
@@ -331,69 +374,137 @@ export function apply(ctx: Context, config: Config): void {
           resumeContext[id] = text
         }
       }
-      active.add(parent)
-      try {
-        const pending = runPlan({
-          parent, signal: AbortSignal.any([exec.signal, unload.signal]),
-          childIsLive: id => ctx.agents.get(id) !== undefined,
-          failureDetail: id => { const detail = budgetFailures.get(id); budgetFailures.delete(id); return detail },
-          start: (request, task) => {
-            const restriction: ToolRestriction = task.readOnly
-              ? { allow: allowed }
-              : deniedDelegation.length === 0 ? { allow: [...ctx.tools.schemas(parent).map(tool => tool.name)] } : { deny: deniedDelegation }
-            return budgetContext.run({ task, restriction }, async () => {
+      const launch = (lifecycle: { signal: AbortSignal; onCheckpoint: (checkpoint: Checkpoint) => void }) => runPlan({
+        parent, signal: lifecycle.signal,
+        onCheckpoint: checkpoint => {
+          const state = turns.get(parent)
+          if (state !== undefined) state.saved = true
+          lifecycle.onCheckpoint(checkpoint)
+        },
+        childIsLive: id => ctx.agents.get(id) !== undefined,
+        failureDetail: id => { const detail = budgetFailures.get(id); budgetFailures.delete(id); return detail },
+        start: async (request, task) => {
+          const restriction: ToolRestriction | undefined = get('fullAccessWorkers') ? undefined : task.readOnly
+            ? { allow: allowed } : deniedDelegation.length === 0 ? { allow: [...ctx.tools.schemas(parent).map(tool => tool.name)] } : { deny: deniedDelegation }
+          // This permit covers child lifetime, not merely individual model streams.
+          const release = request.agentOptions?.provider === 'bharatcode' ? await bharatcodeLane.acquire(request.signal) : () => {}
+          try {
+            return await budgetContext.run({ task, restriction }, async () => {
               const activation = await ctx.subagents.startActivation({
-                provider: get('subagentProvider'),
-                label: request.label ?? `${task.owner}: ${task.title}`,
-                request: {
-                  parent: request.parent,
-                  prompt: request.prompt,
+                provider: get('subagentProvider'), label: request.label ?? `${task.owner}: ${task.title}`,
+                request: { parent: request.parent, prompt: request.prompt,
                   ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
                   ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
                   ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
                   ...(request.outputSchema === undefined ? {} : { outputSchema: request.outputSchema }),
-                  ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }),
-                },
-                signal: request.signal,
-                delivery: 'caller',
+                  ...(request.maxDepth === undefined ? {} : { maxDepth: request.maxDepth }) },
+                signal: request.signal, delivery: 'caller',
               })
-              return { id: activation.childId, result: activation.result, dispose: () => activation.dispose() }
+              let disposal: Promise<void> | undefined
+              const dispose = (): Promise<void> => disposal ??= Promise.resolve().then(() => activation.dispose()).finally(() => {
+                request.signal.removeEventListener('abort', abort); release()
+              })
+              const abort = (): void => { void dispose().catch(error => ctx.logger.warn(`Conductor child cleanup: ${String(error)}`)) }
+              request.signal.addEventListener('abort', abort, { once: true })
+              if (request.signal.aborted) abort()
+              return { id: activation.childId, result: activation.result, dispose }
             })
-          },
-        }, { ...policy, maxWorkers: requestedCap }, {
-          objective, plan, planOnly: args.planOnly ?? false, executeWrites: args.executeWrites ?? false,
-          ...(args.runId === undefined ? {} : { runId: OrchestrationRunId(args.runId) }), ...(resumeContext === undefined ? {} : { resumeContext }),
+          } catch (error) { release(); throw error }
+        },
+      }, { ...policy, maxWorkers: requestedCap }, {
+        objective, plan, planOnly: args.planOnly ?? false, executeWrites: args.executeWrites ?? false,
+        ...(args.runId === undefined ? {} : { runId: OrchestrationRunId(args.runId) }), ...(resumeContext === undefined ? {} : { resumeContext }),
+      })
+      let snapshot: BackgroundSnapshot
+      const background = get('backgroundMode')
+      snapshot = await runs.dispatch(parent.id, launch, terminal => {
+          if (!background || unload.signal.aborted || ctx.agents.get(parent.id) !== parent) return
+          const message = createUserMessage({ content: [{ type: 'text', text:
+            `Conductor run ${terminal.runId}: ${terminal.status}. ` +
+            (terminal.result?.summary ?? terminal.error ?? 'Inspect conductor_status for saved evidence.') +
+            '\n' + boundResult(JSON.parse(JSON.stringify(terminal.result ?? terminal.checkpoint?.result ?? {})) as JsonValue, get('maxResultChars')) +
+            '\nUse the actual evidence, handle unfinished tasks, and report the result to the human. Do not claim failed work succeeded.' }],
+            source: { kind: name, form: 'notice', summary: `Background run ${terminal.status}` } })
+          if (parent.status === 'idle') parent.followup(message)
+          else parent.steer(message)
         })
-        inflight.add(pending)
-        let value: Awaited<typeof pending>
-        try { value = await pending } finally { inflight.delete(pending) }
-        const state = turns.get(parent)
-        if (state !== undefined) state.saved = true
-        // JSON serialization strips no runtime capabilities: this result contains only the recorded plan, states and reports.
-        const result: JsonValue = JSON.parse(JSON.stringify(value))
-        return { runId: value.runId, agentsStarted: value.agentsStarted, result }
-      } finally { active.delete(parent) }
+      if (!background) {
+        const cancel = (): void => { runs.cancel(parent.id, snapshot.runId) }
+        exec.signal.addEventListener('abort', cancel, { once: true })
+        if (exec.signal.aborted) cancel()
+        try { snapshot = await runs.wait(parent.id, snapshot.runId) }
+        finally { exec.signal.removeEventListener('abort', cancel) }
+      }
+      const result: JsonValue = JSON.parse(JSON.stringify({
+        ...(snapshot.status === 'running' ? { taskStates: snapshot.checkpoint?.result.taskStates } : snapshot.result),
+        runId: snapshot.runId, status: snapshot.status,
+        summary: snapshot.status === 'running' ? 'Background run accepted. You can continue the conversation; a terminal notice will arrive.' : snapshot.result?.summary }))
+      return { runId: snapshot.runId, status: snapshot.status, agentsStarted: snapshot.checkpoint?.result.agentsStarted ?? 0, result }
+
     },
-    presentCall: args => ({ card: 'generic', title: 'task orchestrator', rawInput: args.objective }),
+    presentCall: args => ({ card: 'generic', title: 'Conductor dispatch', rawInput: args.objective }),
     presentResult: () => ({ card: 'generic' }),
+  }))
+  const lookup = (parent: Agent, runId?: string): BackgroundSnapshot => {
+    const current = runId === undefined ? runs.active(parent.id) : runs.get(parent.id, runId)
+    if (current !== undefined) return current
+    const saved = [...parent.session.snapshotEvents()].reverse().flatMap(event => {
+      if (event.type !== 'todo/write') return []
+      const checkpoint = (event.data as unknown as { orchestration?: Checkpoint }).orchestration
+      return checkpoint !== undefined && (runId === undefined || checkpoint.runId === runId) ? [checkpoint] : []
+    })[0]
+    if (saved === undefined) throw new Error('No saved Conductor run found in this conversation')
+    return { ownerId: parent.id, runId: saved.runId,
+      status: saved.result.taskStates.some(task => task.state === 'ACTIVE') ? 'blocked' : saved.result.status,
+      checkpoint: saved,
+      error: saved.result.taskStates.some(task => task.state === 'ACTIVE') ? 'Runtime was interrupted; use the saved checkpoint to resume, without duplicating live children.' : undefined }
+  }
+  for (const action of ['status', 'cancel', 'message'] as const) ctx.tools.register(defineTool({
+    name: `conductor_${action}`,
+    description: action === 'status' ? 'Inspect this conversation’s saved task progress, assigned children and complete evidence.' : action === 'cancel' ? 'Cancel this conversation’s active run and dispose its workers.' : 'Send corrected instructions or data to an active assigned worker in this conversation.',
+    parameters: { runId: { type: 'string', description: 'Run ID; omitted selects the current/latest run.' },
+      taskId: { type: 'string', description: 'Assigned task ID required for messaging.' },
+      message: { type: 'string', description: 'New instructions/data required for messaging.' } },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'json', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value.result).slice(0, get('maxResultChars')) }] },
+    async execute(args, exec) {
+      const parent = exec.agent
+      if (parent === undefined || parent.session.header.origin === 'subagent') throw new Error('Only the owning lead can control a run')
+      let snapshot = lookup(parent, args.runId)
+      if (action === 'cancel') snapshot = runs.cancel(parent.id, snapshot.runId)
+      if (action === 'message') {
+        const task = snapshot.checkpoint?.result.taskStates.find(task => task.taskId === args.taskId)
+        if (task?.state !== 'ACTIVE' || task.childId === undefined || !args.message?.trim()) throw new Error('Choose a live assigned task and supply a non-empty message')
+        await ctx.subagents.sendMessage(parent, task.childId, [{ type: 'text', text: args.message }], { signal: exec.signal })
+      }
+      return { result: JSON.parse(JSON.stringify(snapshot)) as JsonValue }
+    }, presentCall: () => ({ card: 'generic', title: `Conductor ${action}` }), presentResult: () => ({ card: 'generic' }),
   }))
   ctx.tools.guard(exec => {
     const parent = exec.agent
-    if (parent === undefined || parent.session.header.origin === 'subagent') return undefined
+    if (parent === undefined) return undefined
+    if (parent.session.header.origin === 'subagent') {
+      if (budgets.has(parent.id) && ['conductor_dispatch', 'subagent', 'subagent_fork', 'workflow'].includes(exec.name))
+        return 'Conductor owns the single-worker queue. Return requested additional work to the lead instead of spawning nested agents.'
+      return undefined
+    }
+    if (runs.active(parent.id) !== undefined && ['subagent', 'subagent_fork', 'workflow'].includes(exec.name)) return 'Use the active Conductor run; direct delegation would bypass its single-worker queue.'
     const state = turns.get(parent)
     if (!state?.required) return undefined
-    if (['subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].includes(exec.name)) return 'Use task_orchestrate with the assigned TODO plan; direct delegation bypasses the task queue.'
-    if (!state.saved && exec.name !== 'task_orchestrate' && exec.name !== 'run_code' && !get('readOnlyTools').includes(exec.name) && !['ask_user', 'request_user_input', 'todo_write', 'plan'].includes(exec.name)) return 'Save an assigned plan through task_orchestrate before implementation.'
+    if (['subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].includes(exec.name)) return 'Use conductor_dispatch with the assigned TODO plan; direct delegation bypasses the task queue.'
+    if (!state.saved && !['conductor_status', 'conductor_message', 'conductor_cancel'].includes(exec.name) && exec.name !== 'conductor_dispatch' && exec.name !== 'run_code' && !get('readOnlyTools').includes(exec.name) && !['ask_user', 'request_user_input', 'todo_write', 'plan'].includes(exec.name)) return 'Save an assigned plan through conductor_dispatch before implementation.'
     return undefined
   })
   ctx.on('agent/pre-step', async ({ agent, messages, turn, step }, next): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision.kind === 'reject' || agent.session.header.origin === 'subagent') return decision
     if (step === 1) {
+      if (runs.active(agent.id) !== undefined) { turns.set(agent, { turn, required: false, saved: true, reminders: 0 }); return decision }
       const mode = get('mode')
       if (mode === 'off') { turns.delete(agent); return decision }
       const reminder = planningReminder()
-      const objective = messages.map(messageText).join('\n').trim()
+      // Host notices are evidence deliveries, not new human work requests.
+      const objective = messages.filter(message => message.source?.kind === 'user').map(messageText).join('\n').trim()
       const required = scoreComplexity(objective) >= get('minComplexityScore')
         || /(?:реализуй|исправь|доработай|разработай|внедри|implement|fix|refactor|build).*(?:проект|плагин|код|project|plugin|code|feature)/is.test(objective)
       turns.set(agent, { turn, required, saved: false, reminders: 0 })
@@ -407,7 +518,7 @@ export function apply(ctx: Context, config: Config): void {
     if (signal.aborted || state?.turn !== turn || !state.required || state.saved) return
     if (state.reminders >= get('maxPlanningReminders')) throw new Error('Required TODO plan was not saved; orchestration is incomplete')
     state.reminders += 1
-    agent.steer(createUserMessage({ content: [{ type: 'text', text: 'The assigned TODO plan has not been saved. Call task_orchestrate now with your explicit plan, or report the concrete blocker that prevents planning. ' + planningReminder() }], source: { kind: name, form: 'notice', summary: 'Required plan is missing' } }))
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: 'The assigned TODO plan has not been saved. Call conductor_dispatch now with your explicit plan, or report the concrete blocker that prevents planning. ' + planningReminder() }], source: { kind: name, form: 'notice', summary: 'Required plan is missing' } }))
   })
 }
 

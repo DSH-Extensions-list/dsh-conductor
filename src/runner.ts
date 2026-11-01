@@ -65,6 +65,7 @@ export interface RunnerHost {
   start: (request: SubagentStartRequest, task: PlannedTask) => Promise<SubagentRun>
   childIsLive: (id: SessionId) => boolean
   failureDetail?: (id: SessionId) => string | undefined
+  onCheckpoint?: (checkpoint: Checkpoint) => void
 }
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error) }
@@ -190,6 +191,7 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
     // Native TODO and plugin checkpoint share one existing event. Older TODO readers select `todos` and retain the extra JSON data.
     const data = { todos: projectTodo(result.plan, result.taskStates), orchestration: structuredClone(checkpoint) }
     host.parent.session.append('todo/write', data)
+    host.onCheckpoint?.(structuredClone(checkpoint))
   }
   save()
   if (request.planOnly || request.plan.requiresConfirmation && !request.executeWrites || request.plan.tasks.some(task => !task.readOnly) && !(policy.allowWrites || request.executeWrites)) {
@@ -240,7 +242,7 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
       }, task)
       state.childId = run.id; save()
       const settled = await run.result
-      if (settled.stopReason !== 'completed') {
+      if (signal.aborted || (settled.stopReason !== 'completed' && !(settled.stopReason === 'max-tokens' && settled.structured !== undefined))) {
         const detail = host.failureDetail?.(run.id) ?? settled.diagnostic
         throw new Error(`Child stopped: ${settled.stopReason}${detail === undefined ? '' : ` — ${detail}`}`)
       }

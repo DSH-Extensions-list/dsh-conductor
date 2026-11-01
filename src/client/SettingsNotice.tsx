@@ -33,7 +33,7 @@ export interface SettingsNoticeInjected { notices: SettingsNotices }
  * @param props - notice store and localized Settings copy.
  * @returns a transient notice, or null.
  */
-export function SettingsNotice({ notices, t }: PropsLocale<'settings.task-orchestrator'> & InjectFace<SettingsNoticeInjected>) {
+export function SettingsNotice({ notices, t }: PropsLocale<'settings.conductor'> & InjectFace<SettingsNoticeInjected>) {
   const notice = useSyncExternalStore(notices.subscribe, notices.getSnapshot, notices.getSnapshot)
   return notice === null ? null : <Toast key={notice.sequence} text={t(notice.kind)} tone={notice.kind === 'saved' ? 'success' : undefined} onDone={notices.dismiss} />
 }

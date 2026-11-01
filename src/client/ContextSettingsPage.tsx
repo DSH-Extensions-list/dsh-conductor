@@ -20,9 +20,10 @@ export interface ContextSettingsInjected {
 
 /** Form, locale and Settings section props assembled by DSH. */
 export type ContextSettingsPageProps = PropsRuntime<'settings.section'>
-  & PropsLocale<'settings.task-orchestrator'> & InjectFace<ContextSettingsInjected>
+  & PropsLocale<'settings.conductor'> & InjectFace<ContextSettingsInjected>
 
-const MAX_TOKENS = 150_000
+const MAX_TOKENS = 1_000_000
+const RANGE_STEPS = Math.ceil(MAX_TOKENS / 1_024)
 const STEP = 1_024
 const styles = {
   page: { display: 'flex', flexDirection: 'column', gap: 16, width: '100%', maxWidth: 760, color: 'var(--dsw-alias-label-primary)' },
@@ -62,7 +63,7 @@ function Budget({ id, title, help, value, disabled, t, onChange }: {
   id: string; title: string; help: string; value: string; disabled: boolean;
   t: (key: ContextSettingsLocaleKey) => string; onChange: (value: string) => void;
 }) {
-  const tokens = Number(value), position = tokens >= MAX_TOKENS ? 147 : Math.round(tokens / STEP)
+  const tokens = Number(value), position = tokens >= MAX_TOKENS ? RANGE_STEPS : Math.round(tokens / STEP)
   return <div style={styles.row}>
     <div style={styles.copy}><label style={styles.label} htmlFor={id}>{title}</label><p style={styles.help} id={`${id}-help`}>{help}</p></div>
     <div style={styles.budgetControl}>
@@ -71,11 +72,11 @@ function Budget({ id, title, help, value, disabled, t, onChange }: {
           aria-describedby={`${id}-help`} onChange={event => onChange(event.currentTarget.value)} />
         <span>{tokens === 0 && value !== '' ? t('unlimited') : t('tokens')}</span>
       </div>
-      <input style={styles.slider} type="range" min={0} max={147} step={1} value={Number.isFinite(position) ? position : 0}
+      <input style={styles.slider} type="range" min={0} max={RANGE_STEPS} step={1} value={Number.isFinite(position) ? position : 0}
         aria-label={title} aria-describedby={`${id}-help`} disabled={disabled}
         aria-valuetext={tokens === 0 ? t('unlimited') : `${value} ${t('tokens')}`}
-        onChange={event => { const next = Number(event.currentTarget.value); onChange(String(next >= 147 ? MAX_TOKENS : next * STEP)) }} />
-      <div style={styles.rangeLabels} aria-hidden="true"><span>{t('unlimited')}</span><span>150,000</span></div>
+        onChange={event => { const next = Number(event.currentTarget.value); onChange(String(next >= RANGE_STEPS ? MAX_TOKENS : next * STEP)) }} />
+      <div style={styles.rangeLabels} aria-hidden="true"><span>{t('unlimited')}</span><span>1,000,000</span></div>
       {tokens > MAX_TOKENS ? <p style={styles.help}>{t('aboveRange')}</p> : null}
     </div>
   </div>
@@ -131,8 +132,8 @@ export function ContextSettingsPage({ t, form, notify, loadModels }: ContextSett
       notify('saveFailed')
     } finally { setSaving(false) }
   }
-  const numberRow = (key: 'maxWorkers' | 'maxConcurrentAgents' | 'maxActiveGenerations' | 'maxChildStarts' | 'maxAttemptsPerTask', min: number, max?: number) => {
-    const id = `task-orchestrator-${key}`
+  const numberRow = (key: 'maxWorkers' | 'maxConcurrentAgents' | 'maxActiveGenerations' | 'maxChildStarts' | 'maxAttemptsPerTask' | 'workerContextTokens' | 'workerOutputTokens', min: number, max?: number) => {
+    const id = `conductor-${key}`
     return <Row id={id} title={t(`${key}Title`)} help={t(`${key}Help`)}>
       <Input id={id} type="number" min={min} max={max} step={1} value={draft[key]} style={styles.number} disabled={disabled}
         aria-describedby={`${id}-help`} onChange={event => edit(key, event.currentTarget.value)} />
@@ -156,7 +157,7 @@ export function ContextSettingsPage({ t, form, notify, loadModels }: ContextSett
         const selected = modelId ? JSON.stringify([provider, modelId]) : ''
         const model = catalog?.groups.find(group => group.id === provider)?.models.find(model => model.id === modelId)
         const efforts = model?.reasoning?.efforts ?? []
-        const id = `task-orchestrator-${fields.role}-model`, effortId = `${id}-effort`
+        const id = `conductor-${fields.role}-model`, effortId = `${id}-effort`
         return <div key={fields.role}>
           <Row id={id} title={t(`${fields.role}Model`)} help={t(`${fields.role}ModelHelp`)}>
             <select id={id} style={{ ...styles.select, width: '100%' }} value={selected} disabled={disabled || (!catalog && catalogLoading)} aria-describedby={`${id}-help`}
@@ -185,16 +186,22 @@ export function ContextSettingsPage({ t, form, notify, loadModels }: ContextSett
     <div>
       <h3 style={styles.subheading}>{t('executionTitle')}</h3>
       <div style={styles.rows}>
-        <Row id="task-orchestrator-mode" title={t('modeTitle')} help={t('modeHelp')}>
-          <select id="task-orchestrator-mode" style={styles.select} value={draft.mode} disabled={disabled} aria-describedby="task-orchestrator-mode-help"
+        <Row id="conductor-mode" title={t('modeTitle')} help={t('modeHelp')}>
+          <select id="conductor-mode" style={styles.select} value={draft.mode} disabled={disabled} aria-describedby="conductor-mode-help"
             onChange={event => edit('mode', event.currentTarget.value as SettingsDraft['mode'])}>
             <option value="hybrid">{t('modeHybrid')}</option><option value="suggest">{t('modeSuggest')}</option>
-            {draft.mode === 'auto' ? <option value="auto">{t('modeAuto')}</option> : null}<option value="off">{t('modeOff')}</option>
+            <option value="auto">{t('modeAuto')}</option><option value="off">{t('modeOff')}</option>
           </select>
         </Row>
-        {numberRow('maxConcurrentAgents', 2, 6)}
-        {numberRow('maxWorkers', draft.requireReview ? 3 : 2, 6)}
-        <Row id="task-orchestrator-review" title={t('reviewTitle')} help={t('reviewHelp')}>
+        <Row id="conductor-background" title={t('backgroundTitle')} help={t('backgroundHelp')}>
+          <Switch checked={draft.backgroundMode} disabled={disabled} label={t('backgroundTitle')} onChange={value => edit('backgroundMode', value)} />
+        </Row>
+        <Row id="conductor-full-access" title={t('fullAccessTitle')} help={t('fullAccessHelp')}>
+          <Switch checked={draft.fullAccessWorkers} disabled={disabled} label={t('fullAccessTitle')} onChange={value => edit('fullAccessWorkers', value)} />
+        </Row>
+        {numberRow('maxConcurrentAgents', 1, 6)}
+        {numberRow('maxWorkers', draft.requireReview ? 2 : 1, 6)}
+        <Row id="conductor-review" title={t('reviewTitle')} help={t('reviewHelp')}>
           <Switch checked={draft.requireReview} disabled={disabled} label={t('reviewTitle')} onChange={value => edit('requireReview', value)} />
         </Row>
         {numberRow('maxActiveGenerations', 1)}
@@ -203,8 +210,10 @@ export function ContextSettingsPage({ t, form, notify, loadModels }: ContextSett
     <div>
       <h3 style={styles.subheading}>{t('contextTitle')}</h3>
       <div style={styles.rows}>
-        <Budget id="task-orchestrator-hard-context" title={t('singleTitle')} help={t('singleHelp')} value={draft.hardContextTokens} disabled={disabled} t={t} onChange={value => edit('hardContextTokens', value)} />
-        <Budget id="task-orchestrator-total-context" title={t('totalTitle')} help={t('totalHelp')} value={draft.totalContextTokens} disabled={disabled} t={t} onChange={value => edit('totalContextTokens', value)} />
+        {numberRow('workerContextTokens', 1, 1_000_000)}
+        {numberRow('workerOutputTokens', 0, 1_000_000)}
+        <Budget id="conductor-hard-context" title={t('singleTitle')} help={t('singleHelp')} value={draft.hardContextTokens} disabled={disabled} t={t} onChange={value => edit('hardContextTokens', value)} />
+        <Budget id="conductor-total-context" title={t('totalTitle')} help={t('totalHelp')} value={draft.totalContextTokens} disabled={disabled} t={t} onChange={value => edit('totalContextTokens', value)} />
       </div>
       <p style={styles.help}>{t('rounding')}</p>
     </div>

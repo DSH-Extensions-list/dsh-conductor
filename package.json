@@ -1,19 +1,17 @@
 {
-  "name": "dsh-task-orchestrator",
-  "version": "1.2.1",
-  "description": "TODO-first orchestration with isolated workers, a two-lane queue, and saved model/reasoning choices for each role.",
+  "name": "dsh-conductor",
+  "version": "0.1.0",
+  "description": "Background Sol orchestration with full-context DeepSeek workers and independent review.",
   "author": {
-    "name": "Hasan Aghayev",
-    "email": "hasan.agaev@gmail.com",
-    "url": "https://github.com/hasan-aghayev"
+    "name": "DSH Extensions"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasan-aghayev/dsh-task-orchestrator.git"
+    "url": "git+https://github.com/DSH-Extensions-list/dsh-conductor.git"
   },
-  "homepage": "https://github.com/hasan-aghayev/dsh-task-orchestrator#readme",
+  "homepage": "https://github.com/DSH-Extensions-list/dsh-conductor#readme",
   "bugs": {
-    "url": "https://github.com/hasan-aghayev/dsh-task-orchestrator/issues"
+    "url": "https://github.com/DSH-Extensions-list/dsh-conductor/issues"
   },
   "keywords": [
     "deepseek-harness",
@@ -47,11 +45,10 @@
     "cordis.patch.yml",
     "README.md",
     "SCENARIO.md",
-    "UPGRADE-1.1.md",
-    "UPGRADE-1.2.md",
     "CHANGELOG.md",
     "VERIFICATION.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "publishConfig": {
     "access": "public"
@@ -88,9 +85,9 @@
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-api-session-controller": ">=0.2.1-rc.2 <0.2.2",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-agent": ">=0.2.1-rc.2 <0.2.2",
+    "@deepseek-ai/dsh-api-session-controller": ">=0.2.1-rc.2 <0.2.2",
     "@deepseek-ai/dsh-brand": ">=0.2.1-rc.2 <0.2.2",
     "@deepseek-ai/dsh-llm": ">=0.2.1-rc.2 <0.2.2",
     "@deepseek-ai/dsh-session": ">=0.2.1-rc.2 <0.2.2",
@@ -107,11 +104,11 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.2",
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
     "@deepseek-ai/dsh-agent-loop-testkit": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.2",
     "@deepseek-ai/dsh-brand": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.2",
@@ -120,6 +117,9 @@
     "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-permission-presets": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session": "0.2.1-rc.2",
     "@deepseek-ai/dsh-subagent": "0.2.1-rc.2",
     "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-rc.2",
@@ -138,5 +138,12 @@
     "tsdown": "^0.22.2",
     "typescript": "^5.9.2",
     "vitest": "^4.1.8"
-  }
+  },
+  "contributors": [
+    {
+      "name": "Hasan Aghayev",
+      "email": "hasan.agaev@gmail.com",
+      "url": "https://github.com/hasan-aghayev"
+    }
+  ]
 }

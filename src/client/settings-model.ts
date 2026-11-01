@@ -14,10 +14,15 @@ export const MODEL_ROLES = [
 /** Editable fields projected by the Host configuration form. */
 export type TaskOrchestratorSettings = Pick<ConfigValues, 'mode' | 'maxWorkers' | 'maxConcurrentAgents'
   | 'requireReview' | 'maxActiveGenerations' | 'maxChildStarts' | 'maxAttemptsPerTask'
-  | 'concurrencyByContext' | 'hardContextTokens' | 'totalContextTokens'> & RoleModelValues
+  | 'concurrencyByContext' | 'hardContextTokens' | 'totalContextTokens'
+  | 'backgroundMode' | 'fullAccessWorkers' | 'workerContextTokens' | 'workerOutputTokens'> & RoleModelValues
 
 /** Fully populated draft; numbers are edited as text so empty and invalid inputs remain visible. */
 export interface SettingsDraft extends Required<RoleModelValues> {
+  backgroundMode: boolean
+  fullAccessWorkers: boolean
+  workerContextTokens: string
+  workerOutputTokens: string
   mode: OrchestrationMode
   maxWorkers: string
   maxConcurrentAgents: string
@@ -31,7 +36,7 @@ export interface SettingsDraft extends Required<RoleModelValues> {
 }
 
 /** Localized validation messages for combinations that the scheduler cannot execute. */
-export type SettingsError = 'invalidNumber' | 'invalidWorkers' | 'invalidStarts' | 'invalidContext' | 'invalidTiers' | 'invalidModel'
+export type SettingsError = 'invalidNumber' | 'invalidWorkers' | 'invalidStarts' | 'invalidContext' | 'invalidTiers' | 'invalidModel' | 'invalidWorkerBudget'
 
 /** Convert a Host view to an independent editable draft without rounding persisted token values.
  * @param value - latest schema-resolved Host fields.
@@ -42,17 +47,15 @@ export function readSettings(value: TaskOrchestratorSettings | undefined): Setti
     orchestratorProvider: value?.orchestratorProvider ?? '', orchestratorModel: value?.orchestratorModel ?? '', orchestratorReasoningEffort: value?.orchestratorReasoningEffort ?? '',
     subagentLlmProvider: value?.subagentLlmProvider ?? '', subagentModel: value?.subagentModel ?? '', subagentReasoningEffort: value?.subagentReasoningEffort ?? '',
     reviewerProvider: value?.reviewerProvider ?? '', reviewerModel: value?.reviewerModel ?? '', reviewerReasoningEffort: value?.reviewerReasoningEffort ?? '',
-    mode: value?.mode ?? 'hybrid', maxWorkers: String(value?.maxWorkers ?? 6),
-    maxConcurrentAgents: String(value?.maxConcurrentAgents ?? 2), requireReview: value?.requireReview ?? true,
-    maxActiveGenerations: String(value?.maxActiveGenerations ?? 2),
+    backgroundMode: value?.backgroundMode ?? true, fullAccessWorkers: value?.fullAccessWorkers ?? true,
+    workerContextTokens: String(value?.workerContextTokens ?? 1_000_000), workerOutputTokens: String(value?.workerOutputTokens ?? 0),
+    mode: value?.mode ?? 'auto', maxWorkers: String(value?.maxWorkers ?? 6),
+    maxConcurrentAgents: String(value?.maxConcurrentAgents ?? 1), requireReview: value?.requireReview ?? true,
+    maxActiveGenerations: String(value?.maxActiveGenerations ?? 1),
     maxChildStarts: String(value?.maxChildStarts ?? 12), maxAttemptsPerTask: String(value?.maxAttemptsPerTask ?? 2),
-    hardContextTokens: String(value?.hardContextTokens ?? 65_536), totalContextTokens: String(value?.totalContextTokens ?? 98_304),
+    hardContextTokens: String(value?.hardContextTokens ?? 0), totalContextTokens: String(value?.totalContextTokens ?? 0),
     concurrencyByContext: (value?.concurrencyByContext ?? [
-      { maxContextTokens: 8_192, maxActiveGenerations: 2 }, { maxContextTokens: 16_384, maxActiveGenerations: 2 },
-      { maxContextTokens: 24_576, maxActiveGenerations: 2 }, { maxContextTokens: 32_768, maxActiveGenerations: 2 },
-      { maxContextTokens: 49_152, maxActiveGenerations: 2 }, { maxContextTokens: 65_536, maxActiveGenerations: 1 },
-      { maxContextTokens: 81_920, maxActiveGenerations: 1 }, { maxContextTokens: 98_304, maxActiveGenerations: 1 },
-      { maxContextTokens: 150_000, maxActiveGenerations: 1 },
+      { maxContextTokens: 1_000_000, maxActiveGenerations: 1 },
     ]).map(tier => ({ ...tier })),
   }
 }
@@ -67,10 +70,11 @@ export function settingsError(draft: SettingsDraft): SettingsError | undefined {
     if ((!model && (provider || effort)) || (model && !provider && fields.role !== 'worker')
       || [provider, model, effort].some(value => value !== value.trim())) return 'invalidModel'
   }
-  const fields = ['maxWorkers', 'maxConcurrentAgents', 'maxActiveGenerations', 'maxChildStarts', 'maxAttemptsPerTask', 'hardContextTokens', 'totalContextTokens'] as const
+  const fields = ['maxWorkers', 'maxConcurrentAgents', 'maxActiveGenerations', 'maxChildStarts', 'maxAttemptsPerTask', 'hardContextTokens', 'totalContextTokens', 'workerContextTokens', 'workerOutputTokens'] as const
   if (fields.some(key => !/^\d+$/.test(draft[key]) || !Number.isSafeInteger(Number(draft[key])))) return 'invalidNumber'
+  if (Number(draft.workerContextTokens) < 1 || Number(draft.workerContextTokens) > 1_000_000 || Number(draft.workerOutputTokens) > Number(draft.workerContextTokens)) return 'invalidWorkerBudget'
   const workers = Number(draft.maxWorkers), concurrent = Number(draft.maxConcurrentAgents)
-  if (workers > 6 || workers < 2 + Number(draft.requireReview) || concurrent < 2 || concurrent > workers) return 'invalidWorkers'
+  if (workers > 6 || workers < 1 + Number(draft.requireReview) || concurrent < 1 || concurrent > workers) return 'invalidWorkers'
   const starts = Number(draft.maxChildStarts), attempts = Number(draft.maxAttemptsPerTask), streams = Number(draft.maxActiveGenerations)
   if (starts < workers || starts > 48 || attempts < 1 || attempts > 8 || streams < 1) return 'invalidStarts'
   const hard = Number(draft.hardContextTokens), total = Number(draft.totalContextTokens)
@@ -109,7 +113,7 @@ export function modelSettingsError(draft: SettingsDraft, baseline: SettingsDraft
 export function saveSettings(form: ConfigForm<TaskOrchestratorSettings>, draft: SettingsDraft, baseline: SettingsDraft, revision: number): Promise<boolean> {
   if (settingsError(draft) !== undefined) return Promise.resolve(false)
   const values: Required<TaskOrchestratorSettings> = {
-    ...draft, maxWorkers: Number(draft.maxWorkers), maxConcurrentAgents: Number(draft.maxConcurrentAgents),
+    ...draft, workerContextTokens: Number(draft.workerContextTokens), workerOutputTokens: Number(draft.workerOutputTokens), maxWorkers: Number(draft.maxWorkers), maxConcurrentAgents: Number(draft.maxConcurrentAgents),
     maxActiveGenerations: Number(draft.maxActiveGenerations), maxChildStarts: Number(draft.maxChildStarts), maxAttemptsPerTask: Number(draft.maxAttemptsPerTask),
     hardContextTokens: Number(draft.hardContextTokens), totalContextTokens: Number(draft.totalContextTokens),
   }

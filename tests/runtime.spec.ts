@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { LlmAdapter, ReasoningEffortId, ToolCallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -50,7 +51,7 @@ describe('DSH production runtime', () => {
           if (id === undefined) {
             parentRequests.push(options)
             parentCalls += 1
-            if (parentCalls === 1) yield* tool('task_orchestrate', { objective: 'Check project', plan: graph }, 'parent-plan')
+            if (parentCalls === 1) yield* tool('conductor_dispatch', { objective: 'Check project', plan: graph }, 'parent-plan')
             else {
               yield { type: 'block-start', index: 0, blockType: 'text' }
               yield { type: 'text-delta', index: 0, text: 'All assigned checks reviewed.' }
@@ -80,9 +81,15 @@ describe('DSH production runtime', () => {
       await ctx.plugin(Subagents)
       await ctx.plugin(Spawn, { providerName: 'spawn' })
       await ctx.plugin(Todo, { allowParallelInProgress: true })
-      ctx.tools.register(defineContentToolFixture({ name: 'read', description: 'Read a fixture', parameters: {}, execute: async () => [{ type: 'text', text: 'read' }] }))
       ctx.tools.register(defineContentToolFixture({ name: 'write', description: 'Forbidden mutation', parameters: {}, execute: async () => { writes += 1; return [{ type: 'text', text: 'written' }] } }))
-      await ctx.plugin(Orchestrator, { maxPlanningReminders: 1,
+      // Standard preset tools live in an ancestor scope, outside the global registry.
+      const presetScopeKey = {}
+      await ctx.plugin(Object.assign((inner: Context) => {
+        const scope = createScope(inner, presetScopeKey)
+        scope.ctx.tools.register(defineContentToolFixture({ name: 'read', description: 'Read a fixture', parameters: {}, execute: async () => [{ type: 'text', text: 'read' }] }))
+      }, { inject: ['tools'] }))
+      ctx.on('agent/created', ({ agent }) => { bindScopeParent(agent, presetScopeKey) })
+      await ctx.plugin(Orchestrator, { backgroundMode: false, respectTaskBudgets: true, fullAccessWorkers: false, maxConcurrentAgents: 2, minParallelTasks: 2, preferredWorkers: 2, maxActiveGenerations: 2, concurrencyByContext: [{ maxContextTokens: 1_000_000, maxActiveGenerations: 2 }], maxPlanningReminders: 1,
         orchestratorProvider: 'planner-provider', orchestratorModel: 'planner', orchestratorReasoningEffort: 'high',
         subagentLlmProvider: 'worker-provider', subagentModel: 'worker', subagentReasoningEffort: 'low',
         reviewerProvider: 'review-provider', reviewerModel: 'review', reviewerReasoningEffort: 'medium',
@@ -108,8 +115,9 @@ describe('DSH production runtime', () => {
       two.resolve(); await idle
       expect(parentCalls).toBe(2); expect(started.size).toBe(5); expect(peak).toBe(2); expect(writes).toBe(0)
       expect(childRequests.every(request => request.maxTokens === 2_048)).toBe(true)
+      expect(childRequests.every(request => (request.tools ?? []).some(tool => tool.name === 'read'))).toBe(true)
       expect(childRequests.every(request => !JSON.stringify(request.messages).includes('PARENT_SECRET_HISTORY'))).toBe(true)
-      expect(childRequests.every(request => !(request.tools ?? []).some(tool => tool.name === 'write' || tool.name === 'task_orchestrate'))).toBe(true)
+      expect(childRequests.every(request => !(request.tools ?? []).some(tool => tool.name === 'write' || tool.name === 'conductor_dispatch'))).toBe(true)
       expect(parentRequests.map(request => [request.provider, request.model, request.reasoningEffort])).toEqual([
         ['planner-provider', 'planner', 'high'], ['planner-provider', 'planner', 'high'],
       ])

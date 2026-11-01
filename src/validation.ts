@@ -1,5 +1,5 @@
 /** Parse model-authored plans and child reports before scheduling. @module */
-import { CONTEXT_TIERS } from './adaptive.js'
+import { MAX_CONTEXT_TOKENS } from './adaptive.js'
 import { TASK_ROLES, type PlannedTask, type TaskPlan, type WorkerReport, type ReviewReport, type WorkerNeed } from './types.js'
 
 /** Require an object from model or durable JSON. */
@@ -31,7 +31,7 @@ export function positiveInteger(value: unknown, field: string): number {
 }
 
 /** Decode and validate a dependency graph; no children start on rejection. */
-export function readPlan(value: unknown, maxChars: number): TaskPlan {
+export function readPlan(value: unknown, maxChars: number, deferBudgetFit = false): TaskPlan {
   const serialized = JSON.stringify(value)
   if (serialized === undefined) throw new TypeError('An explicit parent plan is required')
   if (serialized.length > maxChars) throw new TypeError('Plan exceeds maxHandoffChars; shorten the task packets')
@@ -46,12 +46,12 @@ export function readPlan(value: unknown, maxChars: number): TaskPlan {
       role: choice(item.role, TASK_ROLES, 'role'), prompt: text(item.prompt, 'prompt'),
       dependsOn: strings(item.dependsOn, 'dependsOn'), readOnly: item.readOnly,
       writeScopes: strings(item.writeScopes, 'writeScopes'),
-      contextBudget: positiveInteger(item.contextBudget ?? 24_576, 'contextBudget'),
-      outputReserveTokens: positiveInteger(item.outputReserveTokens ?? 2_048, 'outputReserveTokens'),
+      contextBudget: positiveInteger(item.contextBudget ?? 1_000_000, 'contextBudget'),
+      outputReserveTokens: positiveInteger(item.outputReserveTokens ?? 32_000, 'outputReserveTokens'),
       safetyReserveTokens: positiveInteger(item.safetyReserveTokens ?? 1_024, 'safetyReserveTokens'),
     }
-    if (!CONTEXT_TIERS.includes(task.contextBudget!)) throw new TypeError(`${task.id}: unsupported contextBudget`)
-    if (task.outputReserveTokens! + task.safetyReserveTokens! >= task.contextBudget!) throw new TypeError(`${task.id}: reserves leave no input context`)
+    if (task.contextBudget! > MAX_CONTEXT_TOKENS) throw new TypeError(`${task.id}: unsupported contextBudget`)
+    if (!deferBudgetFit && task.outputReserveTokens! + task.safetyReserveTokens! >= task.contextBudget!) throw new TypeError(`${task.id}: reserves leave no input context`)
     if (task.readOnly && task.writeScopes.length !== 0) throw new TypeError(`${task.id}: read-only task cannot declare writes`)
     if (!task.readOnly && (task.writeScopes.length === 0 || task.writeScopes.some(scope => scope.trim().length === 0))) throw new TypeError(`${task.id}: write task must declare writeScopes`)
     if (item.taskPackage !== undefined) {

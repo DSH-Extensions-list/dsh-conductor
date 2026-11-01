@@ -1,59 +1,17 @@
-# Keep the orchestrator, its workflow engine, and its model-facing tools in one
-# package-owned group. The private ids avoid collisions with the standard rows
-# that the base and web bundles already declare. Disabling this group through
-# DSH Market disables every child row together with the orchestrator.
+# Additive bundle. Conductor owns its tools; no standard or third-party rows are disabled.
 - insert:
-    - id: task-orchestrator-suite
+    - id: conductor-suite
       name: cordis:group
       group: true
-      isolate:
-        workflowEngine: true
       config:
-        - id: task-orchestrator
-          name: dsh-task-orchestrator
-
-        - id: task-orchestrator-tool-subagent-control
-          name: '@deepseek-ai/dsh-tool-subagent-control'
-
-        - id: task-orchestrator-tool-subagent-list-agents
-          name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-
-        - id: task-orchestrator-tool-subagent
-          name: '@deepseek-ai/dsh-tool-subagent'
+        - id: conductor
+          name: dsh-conductor
           config:
-            provider: spawn
-            toolName: subagent
-            backgroundMode: continuable
-
-        - id: task-orchestrator-tool-subagent-fork
-          name: '@deepseek-ai/dsh-tool-subagent'
-          config:
-            provider: fork
-            toolName: subagent_fork
-            backgroundMode: one-shot
-
-        - id: task-orchestrator-workflow
-          name: '@deepseek-ai/dsh-workflow-ptc'
-          config:
-            provider: spawn
-
-# The base rows remain disabled while this bundle is installed. The group above
-# supplies its own enabled instances, so switching the package off cannot fall
-# back to a second copy of the same model-facing tools.
-- id: tool-subagent-control
-  disabled: true
-
-- id: tool-subagent-list-agents
-  disabled: true
-
-- id: tool-subagent
-  disabled: true
-
-- id: tool-subagent-fork
-  disabled: true
-
-- id: workflow-ptc
-  disabled: true
-
-- id: tool-workflow
-  disabled: true
+            orchestratorProvider: codex
+            orchestratorModel: gpt-6.1-sol
+            orchestratorReasoningEffort: medium
+            subagentLlmProvider: bharatcode
+            subagentModel: deepseek-v4.1-flash
+            reviewerProvider: codex
+            reviewerModel: gpt-6.1-sol
+            reviewerReasoningEffort: medium

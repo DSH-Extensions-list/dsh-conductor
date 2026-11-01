@@ -1,116 +1,68 @@
-# DSH Task Orchestrator
+# DSH Conductor
 
-[Usage guide](SCENARIO.md) · [Upgrade to 1.2](UPGRADE-1.2.md) · [Upgrade from 1.0](UPGRADE-1.1.md) · [Release verification](VERIFICATION.md)
+Keep talking to your coordinator while workers do the work. Conductor dispatches a saved task graph in the background, queues BharatCode children one at a time, and delivers reviewed results to the owning conversation.
 
-The parent model writes and assigns a TODO plan before starting isolated workers. Independent work uses up to two model streams by default; additional tasks wait in a dependency-aware queue. The parent receives structured results, missing-data requests and a final review. Short questions use the ordinary single-agent path.
+An MIT fork of [DSH Task Orchestrator](https://github.com/hasan-aghayev/dsh-task-orchestrator), with a new background lifecycle, child lane, full-context budgets, controls and settings. See [attribution](THIRD_PARTY_NOTICES.md) and the [source comparison](docs/research/alternatives.md).
 
-Author: Hasan Aghayev · License: MIT
+## Defaults
 
-## Execution
+The package preset selects **Codex / GPT-6.1 Sol / Medium** for the coordinator and final reviewer, and **BharatCode / DeepSeek v4.1 Flash** for workers. These routes must already exist in your DSH profile. All three roles have model and reasoning selectors in **Settings → Conductor**. Choose other available routes there; unsupported selections fail visibly rather than silently substituting a model.
 
-1. For substantial work, the parent supplies an explicit `plan` to `task_orchestrate`. Every task has a unique `id` and `owner`, a goal, role, dependencies and read/write policy. At least two initial worker tasks must be independent. A required reviewer depends on every worker and occupies an ordinary task slot.
-2. The plugin validates the complete graph and writes native TODO before creating the first child. Short questions need no team. The complexity detector adds planning instructions; it never constructs or executes a graph from keywords.
-3. Ready tasks run through fresh `spawn` contexts. Children receive only their assigned packet, compacted dependency reports and any explicitly supplied additional data. Read-only children receive a real tool allow-list. Output reserves become the child's `maxTokens` setting.
-4. At most two logical children run at once by default. One child's settlement immediately opens a slot for the next ready task. A separate shared scheduler counts actual model streams, including the parent. Limits of both incoming and already active requests apply. Large contexts may run alone. Aged waiting requests can reserve capacity so smaller newcomers do not indefinitely bypass them.
-5. Each native `todo/write` snapshot contains the TODO list plus versioned plugin checkpoint metadata. The checkpoint retains assignments, attempts, child identities, reports and reasons. Completed tasks remain completed when resuming; a crash-interrupted child is marked waiting and is not duplicated if still live.
-6. `NEED_FILE`, `NEED_HISTORY`, `NEED_BUDGET` and other needs return to the parent. No automatic retry occurs without new data or an explicitly corrected unfinished task packet/budget. A run becomes completed only when every task succeeds and required review approves it.
+- Background dispatch returns an accepted run ID immediately. The coordinator can answer another prompt while the run remains pending.
+- Exactly one Conductor-managed BharatCode child is admitted at a time across conversations in this plugin instance. The permit lasts through child disposal, not just one API response. Extra tasks queue. The lead and Codex reviewer stay outside the worker queue.
+- DeepSeek workers default to **1,000,000 combined context tokens** and the selected adapter's complete configured per-response output allowance. The current BharatCode declaration is **32,000 output tokens**, not an independently measured backend maximum. Conductor overrides small model-authored task budgets with the saved full-budget controls.
+- Full-access workers, including reviewers, receive all tools available in their preset plus `danger-full-access` / `approval: never`. Review-only assignments are instructions, not filesystem confinement. Nested delegation tools are guarded so they cannot bypass the single-child queue. Other plugins and external processes are outside that queue.
+- Final review is required by default. Success requires every task's structured evidence and an approved review. Failures, cancellation and missing context are reported with partial evidence.
 
-## Installation
+Context capacity includes input, output and overhead; a million-token window does not mean a million input tokens plus another full output allowance. Conductor does not pad prompts to fill the window or invent capacity above the selected provider's metadata. No aggregate token-spend cap is added; task/start/retry and context controls remain explicit settings.
 
-Version 1.2.1 targets the DSH 0.2.1 API line and is activation-tested against `0.2.1-rc.2`. The supported host range is `>=0.2.1-rc.2 <0.2.2`. Install the versioned release package into a DSH profile:
+## Install when existing work is idle
 
-```sh
-dsh plugin --profile web add https://github.com/hasan-aghayev/dsh-task-orchestrator/releases/download/v1.2.1/dsh-task-orchestrator-1.2.1.tgz
-```
-
-Use your profile name in place of `web`. The same command accepts a locally built tarball. To install the latest source from the default branch, use:
+Conductor targets **DSH >=0.2.1-rc.2 <0.2.2**, Node.js >=22.19. Build a tarball or use a release asset. In a CLI-managed profile:
 
 ```sh
-dsh plugin --profile web add https://github.com/hasan-aghayev/dsh-task-orchestrator.git
+dsh plugin --profile web add ./dsh-conductor-0.1.0.tgz
 ```
 
-`cordis.patch.yml` supplies the `task-orchestrator-suite` group and companion delegation tools. The orchestrator uses the subagent service directly; the companion workflow component is not its execution engine. Configuration and component enablement remain owned by the profile. Enable the suite and orchestrator in Plugins if they are disabled. Restart DSH after updating the installed package so the Host loads the new configuration fields.
+For an Electron-managed desktop profile, use its plugin manager instead of modifying the profile package files directly. Installing/replacing plugins can unload code: wait until existing runs are finished. Disable the previous orchestration extension before enabling Conductor so two planning guards do not compete. Conductor's manifest is additive and does not disable any standard or third-party rows itself.
 
-## Configuration
+The initial delivery was built and tested in isolation. It was **not installed into or reloaded over the user's active DSH process**.
 
-```yaml
-config:
-  mode: hybrid
-  subagentProvider: spawn
-  minParallelTasks: 2
-  preferredWorkers: 2
-  maxWorkers: 6
-  maxTotalAgents: 6
-  maxConcurrentAgents: 2
-  maxActiveGenerations: 2
-  maxChildStarts: 12
-  maxAttemptsPerTask: 2
-  requireReview: true
-  allowWrites: false
-  allowParallelWrites: false
-  hardContextTokens: 65536
-  totalContextTokens: 98304
-  contextCompactionChars: 4096
-  maxPlanningReminders: 2
-  scheduledProviders: []
-```
+## Use
 
-`maxWorkers` and `maxTotalAgents` cap logical tasks, including review. `maxChildStarts` separately caps starts and explicit retries. `preferredWorkers` is planning guidance; `minParallelTasks` validates the independent initial task count. Different useful outputs are the parent's responsibility.
+Ask for ordinary implementation, investigation or review work. Substantial human requests get plan-first guidance and an implementation guard. Complexity detection is heuristic; short answers use ordinary chat, and an explicit delegation request is always available. Terminal notices are evidence deliveries and cannot themselves trigger another planning loop.
 
-The default `concurrencyByContext` permits two streams through 49,152 estimated input tokens and one above that size, through 150,000. The smallest active request's concurrency ceiling also applies to newcomers. `hardContextTokens` guards estimated input; `totalContextTokens` counts estimated input, reserved output and safety across active streams. Each local orchestration child additionally has its assigned whole-request `contextBudget`. When request options omit maxTokens, defaultOutputReserveTokens reserves 2,048 output tokens; requestSafetyReserveTokens reserves 1,024 additional tokens for requests without a task-specific reserve. These estimates do not measure VRAM or replace the provider's tokenizer.
+| Tool | Behavior |
+| --- | --- |
+| `conductor_dispatch` | Save the assigned plan, start/queue children and return a background run ID. `runId` plus corrected context resumes a saved run. |
+| `conductor_status` | Show this conversation's current/latest or specified run, task states, child IDs and evidence. |
+| `conductor_message` | Deliver new instructions or information to an active assigned task. |
+| `conductor_cancel` | Cancel an owned run, dispose active children and release queued admissions. |
 
-An empty `scheduledProviders` list schedules every LLM route in this process. Set it to the local provider's registered name to keep cloud routes outside the local shared queue. Children still retain their task-level output limit. Hard child context checks require in-process `spawn` execution; a remote runtime needs its own corresponding resource policy.
+You can continue the conversation, ask for status, or redirect an active worker. One run per coordinator is active at a time. A separate project/conversation can have a separate run while sharing the global BharatCode lane. Follow-up work can steer the current run or be dispatched after it settles.
 
-`mode: off` disables automatic planning instructions and guards but retains the explicit tool. `suggest` asks for a saved plan first; existing human authorization permits execution. `hybrid` and `auto` instruct the parent to plan and execute substantial work within existing authorization. Plans requesting confirmation, and unauthorized write tasks, return `plan-only`. A bounded reminder policy reports failure if a required plan is never saved.
+Settings changes are staged and saved atomically with revision checks. Running runs keep their captured model/policy choices; a new run uses saved changes. Controls include background mode, full access, worker context/output, task slots, review, starts/retries and context estimates. Output `0` means the selected adapter's declared output allowance. Optional `respectTaskBudgets: true` allows explicit per-task reductions for advanced deployments.
 
-The web **Settings → Task Orchestrator** page edits models and reasoning for all three roles, planning mode, active task slots, logical task count, final review, shared model streams and both context budgets. Advanced controls edit context/concurrency ranges, total child starts and starts per task. Numeric context inputs preserve exact saved values; sliders use 1,024-token steps. Zero disables that global context check, while task budgets and concurrency limits still apply. Conflicting combinations disable Save. The defaults action stages the two-worker settings without saving them automatically and preserves model assignments.
+## Output-limit continuation
 
-One atomic, revision-fenced Save changes only edited fields in the profile. A refusal keeps the draft; a newer Host revision requires Reload. Outcome notices live in the shell and survive closing Settings. New task runs snapshot their execution policy; active runs keep that policy. Model streams read current request limits. Queued requests honor the latest shared/global limits and tighter context ceilings; lowering a limit does not cancel active streams. Updating the installed plugin package requires restarting DSH to load the new Host schema.
+Keep the existing `max-tokens-continue` extension enabled. It continues the **same in-process worker** with its retained conversation when output is truncated. Conductor accepts a sticky `max-tokens` outcome only when a final structured result actually committed and validates; truncated tool arguments, missing capture, aborts and errors remain unsuccessful. The continuation extension retains its own retry/progress settings (the inspected version defaults to nine continuations); Conductor does not pretend those are unlimited.
 
-## Models and reasoning
+Retained conversation is subject to the host's existing compaction, image-offload and tool-output policies. The continuation hook cannot reconstruct content that the host has already removed. External CLI/SDK workers would need their own continuation setup; Conductor's tested transport is in-process `spawn`.
 
-Choose **Orchestrator model**, **Worker model** and **Reviewer model** in Settings, then choose each model's reasoning level and Save. Models are grouped by their registered LLM provider. Levels come from DSH's model catalog; there is no fixed list of efforts and no reasoning control for models that do not advertise adjustable reasoning. Changing a model clears its previous effort. **Model default** omits an explicit effort, allowing the selected model's provider default.
+## Persistence and boundaries
 
-| Role | Model fields | Reasoning field | Inheritance when no model is assigned |
-| --- | --- | --- | --- |
-| Orchestrator | `orchestratorProvider`, `orchestratorModel` | `orchestratorReasoningEffort` | Keep the current chat selection and reasoning. |
-| Workers | `subagentLlmProvider`, `subagentModel` | `subagentReasoningEffort` | Inherit the parent's effective selection and reasoning. |
-| Reviewer | `reviewerProvider`, `reviewerModel` | `reviewerReasoningEffort` | Inherit the worker selection and reasoning. |
+Native TODO events save complete assignments, attempts, children, reports and review evidence. Status can reconstruct a saved checkpoint after a process interruption. Conductor does not silently restart interrupted write tasks; an explicit resume preserves completed evidence and refuses to duplicate a live child. Per-session controls cannot address another coordinator's runs. Plugin shutdown cancels and awaits owned executions, including foreground compatibility mode.
 
-These are plain strings in profile YAML. Empty strings mean inheritance for model/provider fields and the model default for an explicitly assigned model's effort. A parent or reviewer assignment requires both provider and model. Legacy `subagentModel` without `subagentLlmProvider` remains supported and inherits the parent's provider. `subagentProvider: spawn` chooses the child execution service, while `subagentLlmProvider` chooses the LLM route.
+Workers share the workspace. Writes are serialized by default; declared scopes help scheduling and prompts, while full-access tools remain able to reach other files. Task evidence and model review are useful checks, not proof that arbitrary generated code is correct.
 
-The Web parent uses DSH's native model selector when a new Session starts, so its saved model and reasoning appear in the new chat immediately. A model or reasoning choice made manually before the first response remains selected. A saved parent assignment also applies after its model/effort settings change. The native selector records the selection in the Session and updates DSH's default model for future chats. Clearing the saved assignment preserves the current chat choice. Headless profiles use DSH's scoped model-selection helper. Both paths keep prompt model information and actual request routing consistent, including changes made during asynchronous assembly.
-
-Worker and reviewer selections are captured once per tool invocation, including an explicit resume. Active children and remaining queued tasks in that invocation keep the captured selections. An explicit assignment without an effort clears inherited reasoning even when it names the same model as the parent. Actual request headers record provider, model and resolved effort. Unavailable or unsupported choices fail through DSH's validation; the plugin does not silently substitute a model.
-
-**Refresh models** reloads the native catalog. Discovery failures retain saved choices and other staged edits. A stored unavailable assignment remains visible and can be cleared; unrelated queue settings can still be saved. The form validates newly edited assignments against the successfully loaded catalog. Models must already be configured in the DSH profile; assigning one here does not install or load a local model server.
-
-## Tool fields
-
-`task_orchestrate` requires `objective` and `plan`. A plan contains `summary`, `risk` (`low`, `medium` or `high`), `requiresConfirmation` and `tasks`. Optional tool fields are `planOnly`, `executeWrites`, `maxWorkers`, `runId` and `resumeContext`. `executeWrites` must reflect existing human authorization, not create it. See the [complete read-only example](SCENARIO.md#example-plan).
-
-Every plan task requires `id`, `title`, `owner`, `role`, `prompt`, `dependsOn`, `readOnly` and `writeScopes`. Optional `taskPackage` carries relevant context, facts, files, constraints and expected output. Defaults are `contextBudget: 24576`, `outputReserveTokens: 2048`, `safetyReserveTokens: 1024`. Supported roles: researcher, architect, backend, frontend, tester, documentation, reviewer.
-
-Resume the returned `runId` with `resumeContext: { taskId: "new information" }`. You may also revise the budget or packet of an unfinished task. Assignment, goal, dependencies and write permissions must stay identical; completed task inputs cannot change while reusing their evidence. A task blocked solely by dependencies becomes ready after they succeed. Partial results remain recorded on errors and cancellation.
-
-Native TODO uses its three statuses: queued/waiting/failed tasks remain pending with a reason, active tasks are in progress, successful tasks are completed. Full task states and reports live in the same saved event. Parent-facing text and complete dependency excerpts are bounded by configuration; full checkpoint data remains available in the session log.
-
-## Development and verification
+## Development
 
 ```sh
 corepack pnpm@12.4.1 install --frozen-lockfile
-corepack pnpm@12.4.1 check
-corepack pnpm@12.4.1 test
-corepack pnpm@12.4.1 build
-corepack pnpm@12.4.1 pack
+pnpm check
+pnpm test
+pnpm build
+pnpm pack
 ```
 
-The development and CI environment uses Node.js 24 and pnpm 12.4.1. Runtime requires Node.js 22.19 or later. The package does not pin the profile's package manager; DSH manages profile installation.
-
-Tests control child settlement with barriers and exercise the shipped DSH production loop, real spawn provider, native TODO and a scripted model adapter. They verify separate provider/model/effort assignments, logged routing, context isolation, two active lanes, queue refill, read-only denial, output limits, hard task-budget rejection, missing-data resume, interrupted-run recovery, cancellation and reviewer approval. The scripted adapter does not establish a real local model's reliability or hardware throughput.
-
-Host JavaScript and the browser settings module are built into `lib/`; declarations are in `lib/types/`. The [verification report](VERIFICATION.md) records the checks and their limits. Read [the upgrade guide](UPGRADE-1.1.md) before replacing a 1.0.x installation.
-
-## Limits
-
-Workers share a workspace; the plugin does not create worktrees. Declared write scopes prevent overlapping declared writers and guide prompts, while filesystem permissions remain the profile's responsibility. Parallel writes are disabled by default. Read-only enforcement depends on the configured read-tool allow-list. The lexical detector can miss a short difficult request; the parent can explicitly invoke the tool. Report compaction is bounded text, not a semantic summary. The plugin does not monitor GPU memory.
+Tests use the real DSH loop/spawn services with a deterministic adapter, temporary files and barriers. They prove dispatch, conversation responsiveness, queue ownership, cancellation, permissions, selectors and continuation mechanics without paid/live model calls. See [verification](VERIFICATION.md) for the current run and its limits.

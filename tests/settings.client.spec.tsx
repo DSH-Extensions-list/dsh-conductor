@@ -6,7 +6,7 @@ import type { InputHTMLAttributes, ButtonHTMLAttributes } from 'react'
 import { ContextSettingsPage } from '../src/client/ContextSettingsPage.tsx'
 import { inject as clientInject } from '../src/client/index.tsx'
 import { SettingsNotice, SettingsNotices } from '../src/client/SettingsNotice.tsx'
-import { readSettings, saveSettings, settingsError, type TaskOrchestratorSettings } from '../src/client/settings-model.ts'
+import { readSettings, saveSettings, settingsError, modelSettingsError, type TaskOrchestratorSettings } from '../src/client/settings-model.ts'
 import { en, zh } from '../src/client/locales.ts'
 import type { ContextSettingsLocaleKey } from '../src/client/locales.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-remotes/client'
@@ -50,6 +50,77 @@ function fixture(options: { writable?: boolean; refusal?: boolean; failure?: boo
 }
 
 describe('profile-backed orchestration settings', () => {
+  it('stages background, access and worker budgets in one revision-fenced save', async () => {
+    const f = fixture(); render(<ContextSettingsPage {...f.props} />)
+    expect(screen.getByRole('switch', { name: 'Run tasks in the background' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByRole('switch', { name: 'Full worker tool access' }).getAttribute('aria-checked')).toBe('true')
+    expect((screen.getByLabelText('Worker context budget') as HTMLInputElement).value).toBe('1000000')
+    expect((screen.getByLabelText('Worker output per request') as HTMLInputElement).value).toBe('0')
+    expect(screen.getByText(/Only one BharatCode child can exist at a time/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('switch', { name: 'Run tasks in the background' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Full worker tool access' }))
+    fireEvent.change(screen.getByLabelText('Worker context budget'), { target: { value: '900000' } })
+    fireEvent.change(screen.getByLabelText('Worker output per request'), { target: { value: '32000' } })
+    expect(f.mutate).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: en.save }))
+    await waitFor(() => expect(f.notices.getSnapshot()?.kind).toBe('saved'))
+    expect(f.mutate).toHaveBeenCalledWith([
+      { op: 'set', path: ['backgroundMode'], value: false },
+      { op: 'set', path: ['fullAccessWorkers'], value: false },
+      { op: 'set', path: ['workerContextTokens'], value: 900000 },
+      { op: 'set', path: ['workerOutputTokens'], value: 32000 },
+    ], 7)
+  })
+
+  it('uses single-child defaults and permits one worker plus its reviewer', () => {
+    const draft = readSettings(undefined)
+    expect(draft).toMatchObject({ mode: 'auto', maxConcurrentAgents: '1', maxActiveGenerations: '1', hardContextTokens: '0', totalContextTokens: '0',
+      backgroundMode: true, fullAccessWorkers: true, workerContextTokens: '1000000', workerOutputTokens: '0',
+      concurrencyByContext: [{ maxContextTokens: 1000000, maxActiveGenerations: 1 }] })
+    expect(settingsError({ ...draft, maxWorkers: '2' })).toBeUndefined()
+    expect(settingsError({ ...draft, workerContextTokens: '0' })).toBe('invalidWorkerBudget')
+    expect(settingsError({ ...draft, workerContextTokens: '1000001' })).toBe('invalidWorkerBudget')
+    expect(settingsError({ ...draft, workerOutputTokens: '1000001' })).toBe('invalidWorkerBudget')
+  })
+
+  it.each([
+    [en.orchestratorModel, en.orchestratorEffort, 'orchestratorProvider', 'orchestratorModel', 'orchestratorReasoningEffort'],
+    [en.workerModel, en.workerEffort, 'subagentLlmProvider', 'subagentModel', 'subagentReasoningEffort'],
+    [en.reviewerModel, en.reviewerEffort, 'reviewerProvider', 'reviewerModel', 'reviewerReasoningEffort'],
+  ] as const)('retains the unavailable %s assignment during discovery failure', async (label, effortLabel, provider, model, effort) => {
+    const f = fixture({ value: { [provider]: 'offline', [model]: 'stored', [effort]: 'deep' } })
+    f.props.loadModels.mockRejectedValueOnce(new Error('discovery failed'))
+    render(<ContextSettingsPage {...f.props} />)
+    await screen.findByText(en.modelsFailed)
+    expect((screen.getByLabelText(label) as HTMLSelectElement).value).toBe(JSON.stringify(['offline', 'stored']))
+    expect((screen.getByLabelText(effortLabel) as HTMLSelectElement).value).toBe('deep')
+    fireEvent.click(screen.getByRole('switch', { name: 'Run tasks in the background' }))
+    fireEvent.click(screen.getByRole('button', { name: en.save }))
+    await waitFor(() => expect(f.mutate).toHaveBeenCalledWith([{ op: 'set', path: ['backgroundMode'], value: false }], 7))
+  })
+
+  it('fences staged model and execution changes against a newer profile revision', async () => {
+    const f = fixture(); render(<ContextSettingsPage {...f.props} />)
+    await screen.findAllByRole('option', { name: 'Reasoning model' })
+    fireEvent.change(screen.getByLabelText(en.workerModel), { target: { value: JSON.stringify(['local', 'think']) } })
+    fireEvent.click(screen.getByRole('switch', { name: 'Run tasks in the background' }))
+    act(() => f.publish({ revision: 8, value: { backgroundMode: true, subagentLlmProvider: 'local', subagentModel: 'plain' } }))
+    expect((screen.getByRole('button', { name: en.save }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByLabelText(en.workerModel) as HTMLSelectElement).value).toBe(JSON.stringify(['local', 'think']))
+    fireEvent.click(screen.getByRole('button', { name: en.reload }))
+    expect((screen.getByLabelText(en.workerModel) as HTMLSelectElement).value).toBe(JSON.stringify(['local', 'plain']))
+    expect(screen.getByRole('switch', { name: 'Run tasks in the background' }).getAttribute('aria-checked')).toBe('true')
+    expect(f.mutate).not.toHaveBeenCalled()
+  })
+
+  it('validates edited model reasoning without rejecting unchanged unavailable assignments', () => {
+    const baseline = readSettings({ reviewerProvider: 'offline', reviewerModel: 'stored', reviewerReasoningEffort: 'deep' })
+    expect(modelSettingsError(baseline, baseline, catalog)).toBeUndefined()
+    expect(modelSettingsError({ ...baseline, subagentLlmProvider: 'local', subagentModel: 'think', subagentReasoningEffort: 'unsupported' }, baseline, catalog)).toBe('invalidModel')
+    expect(modelSettingsError({ ...baseline, subagentLlmProvider: 'local', subagentModel: 'think', subagentReasoningEffort: 'low' }, baseline, catalog)).toBeUndefined()
+    expect(modelSettingsError({ ...baseline, subagentLlmProvider: 'local', subagentModel: 'think' }, baseline, undefined)).toBe('invalidModel')
+  })
+
   it('injects the Session Remote used to load the model catalog', () => {
     expect(clientInject).toContain('remote.session')
   })
@@ -100,13 +171,13 @@ describe('profile-backed orchestration settings', () => {
 
   it('refuses invalid combinations and shows unlimited without changing the other budget', () => {
     const f = fixture(); render(<ContextSettingsPage {...f.props} />)
-    fireEvent.change(screen.getByLabelText(en.maxWorkersTitle), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText(en.maxWorkersTitle), { target: { value: '1' } })
     expect(screen.getByRole('alert').textContent).toBe(en.invalidWorkers)
     expect((screen.getByRole('button', { name: en.save }) as HTMLButtonElement).disabled).toBe(true)
     fireEvent.change(screen.getByLabelText(en.maxWorkersTitle), { target: { value: '6' } })
     fireEvent.change(screen.getByLabelText(en.totalTitle, { selector: 'input[type=number]' }), { target: { value: '0' } })
     expect(screen.queryByRole('alert')).toBeNull()
-    expect((screen.getByLabelText(en.singleTitle, { selector: 'input[type=number]' }) as HTMLInputElement).value).toBe('65536')
+    expect((screen.getByLabelText(en.singleTitle, { selector: 'input[type=number]' }) as HTMLInputElement).value).toBe('0')
     expect(screen.getAllByText(en.unlimited).length).toBeGreaterThan(1)
   })
 

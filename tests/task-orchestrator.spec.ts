@@ -4,7 +4,7 @@ import { Config, scoreComplexity } from '../src/index.ts'
 import { ResourceManager, estimateInputTokens } from '../src/resource-manager.ts'
 import { CONTEXT_TIERS, estimateTaskBudget, packReadyTasks, selectContextTier } from '../src/adaptive.ts'
 
-describe('DSH Task Orchestrator', () => {
+describe('DSH Conductor', () => {
   it('declares DSH 0.2.1 compatibility for every required runtime package', () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: Record<string, string>
@@ -41,7 +41,7 @@ describe('DSH Task Orchestrator', () => {
 
   it('keeps default context concurrency within the default global ceiling', () => {
     const defaults = Config({})
-    expect(defaults.maxActiveGenerations.get()).toBe(2)
+    expect(defaults.maxActiveGenerations.get()).toBe(1)
     expect(defaults.concurrencyByContext.get().every(tier => tier.maxActiveGenerations <= defaults.maxActiveGenerations.get())).toBe(true)
   })
 
@@ -53,13 +53,13 @@ describe('DSH Task Orchestrator', () => {
     for (const field of ['orchestratorProvider', 'orchestratorModel', 'orchestratorReasoningEffort', 'subagentLlmProvider', 'subagentModel', 'subagentReasoningEffort', 'reviewerProvider', 'reviewerModel', 'reviewerReasoningEffort']) expect(Config.dict?.[field]?.meta.volatile).toBe(true)
   })
 
-  it('selects the smallest supported context tier through the 150K ceiling', () => {
+  it('selects the smallest supported context tier through the million-token ceiling', () => {
     expect(selectContextTier(8_193)).toBe(16_384)
     expect(selectContextTier(65_537)).toBe(81_920)
     expect(selectContextTier(98_305)).toBe(99_328)
-    expect(selectContextTier(149_505)).toBe(150_000)
+    expect(selectContextTier(149_505)).toBe(150_528)
     expect(CONTEXT_TIERS.slice(0, 8)).toEqual([8_192, 16_384, 24_576, 32_768, 49_152, 65_536, 81_920, 98_304])
-    expect(CONTEXT_TIERS.at(-1)).toBe(150_000)
+    expect(CONTEXT_TIERS.at(-1)).toBe(1_000_000)
   })
 
   it('packs only the largest safe ready tasks into the available generation budget', () => {
@@ -181,32 +181,14 @@ describe('DSH Task Orchestrator', () => {
     expect(manager.activeGenerations).toBe(0)
   })
 
-  it('enables the workflow engine required by the bundle', () => {
-    const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-    expect(patch).toContain('id: task-orchestrator-workflow')
-    expect(patch).toContain("name: '@deepseek-ai/dsh-workflow-ptc'")
-    expect(patch).toContain('provider: spawn')
-  })
 
-  it('owns the model-facing delegation tools in one disableable group', () => {
-    const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-    expect(patch).toContain('- id: task-orchestrator-suite')
-    expect(patch).toContain('name: cordis:group')
-    expect(patch).toContain('workflowEngine: true')
-    for (const id of [
-      'task-orchestrator-tool-subagent-control',
-      'task-orchestrator-tool-subagent-list-agents',
-      'task-orchestrator-tool-subagent',
-      'task-orchestrator-tool-subagent-fork',
-      'task-orchestrator-workflow',
-    ]) {
-      expect(patch).toContain(`- id: ${id}`)
-    }
-    expect(patch).toContain('toolName: subagent')
-    expect(patch).toContain('toolName: subagent_fork')
-    for (const id of ['tool-subagent-control', 'tool-subagent-list-agents', 'tool-subagent', 'tool-subagent-fork', 'workflow-ptc', 'tool-workflow']) {
-      expect(patch).toContain(`- id: ${id}\n  disabled: true`)
-    }
+
+  it('installs additively without disabling standard tools or another extension', () => {
+    const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+    expect(patch).toContain('id: conductor-suite')
+    expect(patch).toContain('name: dsh-conductor')
+    expect(patch).not.toContain('disabled: true')
+    expect(patch).not.toContain('toolName: subagent')
   })
 
 

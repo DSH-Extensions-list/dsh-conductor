@@ -1,33 +1,18 @@
-# Release verification — 1.2.0
+# Verification — Conductor 0.1.0
 
-Verified on September 30, 2026 with Node.js 24.18.0, pnpm 12.4.1 and DSH `0.2.0-rc.2` dependencies.
+Verified on 1 November 2026 with Node.js24 and DSH 0.2.1-rc.2 development dependencies, in an isolated repository.
 
-## Automated checks
+- TypeScript no-emit check passed.
+- Complete Vitest suite: **102 tests passed across 13 files**.
+- Host/declaration build and browser settings bundle passed.
+- Independent source review identified a terminal-notice re-planning loop and untracked foreground lifecycle; both were reproduced/fixed and covered before packaging. A cancellation display envelope was also made consistent.
 
-- `corepack pnpm@12.4.1 install --frozen-lockfile`: a fresh source copy installed successfully without existing dependencies or build outputs.
-- `pnpm check`: TypeScript validation passed.
-- `pnpm test`: 54 tests passed across seven files.
-- `pnpm pack`: Host code, browser settings module and declarations built successfully before packaging.
-- `git diff --check`: no whitespace errors.
+The production-loop tests use the shipped DSH agent loop, native scoped tool registry, in-process spawn, native TODO and deterministic adapter streams. Workers are held on barriers while the parent answers another prompt. Cross-parent tests measure actual child creation/disposal order, not only stream counts: peak Conductor-managed BharatCode children is one even with task/model slots configured to two. Cancellation aborts a pending generation and releases the permit to the next owner.
 
-Runner tests cover TODO persistence before child creation, two independent workers, immediate queue refill, dependency ordering, final review, missing-data continuation, interrupted-run recovery, cancellation and retained partial reports. Worker reports must match the task identity assigned by the parent.
+Full-access tests execute file reads and writes in isolated temporary directories from logically read-only worker/reviewer roles, verify full sandbox/preset and never-ask approval events, and deny nested delegation through Conductor's guard. Model and reasoning selectors are tested for staged atomic changes, catalog failure/retry, unavailable choices, unsupported reasoning and revision conflicts.
 
-The runtime test uses DSH's production agent loop, the real spawn provider and native TODO events. A scripted model adapter supplies deterministic responses. It verifies different provider/model/reasoning selections for parent, workers and reviewer, recorded request headers, separate child contexts, two simultaneous model streams, read-only tool denial, output limits and task-budget rejection. It does not establish a real local model's quality or GPU throughput.
+Continuation tests adapt the installed max-tokens-continue hook in a test-local attributed fixture. They verify same-child retained context, sticky max-tokens after a later committed structured result, rejected truncated tool calls and complete reviewed task results.
 
-Role-policy tests exercise inheritance, independent reviewer choices, explicit model defaults without inherited effort, legacy model-only worker assignment and incomplete configuration rejection. A production-loop test uses a prompt-assembly barrier to verify that a concurrent choice change affects the next request and records the model-change notice. Native-selector seam tests verify calls, change detection, child exclusion and refusal before assembly using a controlled selector; they do not exercise a complete live Web Session controller.
+The default million-token budget and complete configured output allowance are verified in actual constructed requests/checkpoints, including model-authored attempts to reduce task budgets. This establishes configuration/transport behavior; no million-token paid request or backend maximum-output probe was sent.
 
-Settings tests cover atomic saves of three model/effort assignments, available reasoning levels, clearing effort on a model change, retained unavailable choices, discovery failure and retry, preserved model choices when staging queue defaults, exact numeric values, invalid combinations, read-only forms, refused saves, connection errors, revision conflicts and notices after the form closes. Runtime tests also cover live planning-mode changes, tighter queue limits and preservation of active streams when limits decrease.
-
-## Package and browser checks
-
-The locally installed package was checked against its tarball contents. The installation retained the profile's configuration and component enablement. The Host configuration schema exposes the ten queue/context fields and nine role model fields. The final release package is built from the fresh source copy and includes the English usage, migration and verification guides.
-
-An isolated browser preview used the real shared DSH controls and theme tokens. Chrome checks covered light and dark themes, a 760-pixel form, a 360-pixel form, three role model/effort selectors and save feedback. At 360 pixels the form had no horizontal overflow. Preview saves and the model catalog used test state and did not change the user's profile. Earlier 1.1.1 checks also covered the unchanged expanded concurrency table.
-
-## Limits of the evidence
-
-The full local profile's schema export reports existing errors in four standard preset components. Its overall schema export is not a passing check, even though the orchestrator's own schema was generated successfully.
-
-The running DSH process was not restarted during local installation. A restart is required to load the updated package and its Host configuration fields. The browser preview checks the form itself; it does not establish that the existing process has reloaded the plugin.
-
-Real local model execution, GPU memory usage, sustained load and performance comparisons remain unmeasured for this release. Earlier hardware experiments under `plans/` and `bench/` describe older deployments and do not establish 1.2.0 performance.
+The user's running DSH process, installed extensions and active sessions were not modified, restarted or reloaded during this build. Live activation with real models remains a separate acceptance step when existing work is idle. Scripted adapters do not establish arbitrary-model reasoning quality, universal delegation reliability, or correctness of future generated changes.

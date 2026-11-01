@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const packageName = 'dsh-task-orchestrator'
+const packageName = 'dsh-conductor'
 
 /** Build the module-loader-compatible browser half beside the Host package. */
 export default defineConfig({

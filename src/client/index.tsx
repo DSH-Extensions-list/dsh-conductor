@@ -1,4 +1,4 @@
-/** Client-side settings page for Task Orchestrator. */
+/** Client-side settings page for Conductor. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -13,12 +13,12 @@ import { en, zh, type ContextSettingsLocaleKey } from './locales.js'
 import { SettingsNotice, SettingsNotices } from './SettingsNotice.js'
 
 /** Dictionary namespace registered for the plugin's page. */
-export const NS = 'settings.task-orchestrator'
+export const NS = 'settings.conductor'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Task Orchestrator Settings section copy. */
-    'settings.task-orchestrator': ContextSettingsLocaleKey
+    /** Conductor Settings section copy. */
+    'settings.conductor': ContextSettingsLocaleKey
   }
 }
 
@@ -31,9 +31,9 @@ export const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.sessi
  */
 export function apply(ctx: Context): void {
   const t = ctx.locale.bind(NS)
-  const form = ctx.configForms.get<TaskOrchestratorSettings>('task-orchestrator')
+  const form = ctx.configForms.get<TaskOrchestratorSettings>('conductor')
   const notices = new SettingsNotices()
-  ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'task-orchestrator settings dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'conductor settings dictionaries')
   const loadModels: ContextSettingsInjected['loadModels'] = async () => {
     const response = await ctx.remote.session.modelCatalog()
     if (!response.ok) throw new Error(response.error.message)
@@ -42,14 +42,14 @@ export function apply(ctx: Context): void {
   const injected = (): ContextSettingsInjected => ({ form, notify: notices.publish, loadModels })
   ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
-    id: 'task-orchestrator',
+    id: 'conductor',
     order: 16,
     label: () => t('nav'),
     locale: NS,
     inject: injected,
-  }, ContextSettingsPage)), 'task-orchestrator Settings section')
+  }, ContextSettingsPage)), 'conductor Settings section')
   ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-    name: 'shell.overlay', id: 'task-orchestrator.settings-notice', locale: NS,
+    name: 'shell.overlay', id: 'conductor.settings-notice', locale: NS,
     inject: () => ({ notices }),
-  }, SettingsNotice)), 'task-orchestrator settings outcomes')
+  }, SettingsNotice)), 'conductor settings outcomes')
 }

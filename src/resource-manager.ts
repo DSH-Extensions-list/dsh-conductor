@@ -1,5 +1,5 @@
 /**
- * Bounded model-request scheduler for one resident NInfer process.
+ * Bounded model-request scheduler for owned worker streams.
  *
  * Logical Agents can outnumber the model's active generation lanes. This
  * scheduler owns only the short interval while a model stream is consumed;
@@ -90,7 +90,7 @@ export function estimateInputTokens(options: GenerateOptions): number {
   for (const tool of options.tools ?? []) characters += tool.name.length + tool.description.length + (JSON.stringify(tool.parameters)?.length ?? 32) + 32
   // English and Russian prose in the active Qwen tokenizer averages close to
   // four characters per token. This estimate remains conservative because
-  // role/id/tool overhead is counted above; NInfer still performs the exact
+  // role/id/tool overhead is counted above; The selected provider still performs the exact
   // admission check after tokenization.
   return Math.ceil(characters / 4)
 }
@@ -205,7 +205,7 @@ export class ResourceManager {
   }
 
   private acquire(input: Admission): Promise<void> {
-    if (this.closed) return Promise.reject(new Error('task-orchestrator scheduler unloaded'))
+    if (this.closed) return Promise.reject(new Error('conductor scheduler unloaded'))
     if (input.signal?.aborted) return Promise.reject(new Error('model request cancelled before queue admission'))
     if (this.queue.length === 0 && this.canAdmit(input)) {
       this.active += 1
@@ -254,7 +254,7 @@ export class ResourceManager {
   /** Reject waiting work when the plugin is unloaded. Active streams keep their caller cancellation. */
   close(): void {
     this.closed = true
-    for (const waiter of this.queue.splice(0)) waiter.reject(new Error('task-orchestrator scheduler unloaded'))
+    for (const waiter of this.queue.splice(0)) waiter.reject(new Error('conductor scheduler unloaded'))
   }
 
   private drain(): void {
