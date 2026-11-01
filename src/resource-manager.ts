@@ -9,10 +9,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { LlmError, CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 /** Runtime policy for the local model request scheduler. */
 export interface ResourceManagerConfig {
+  /** Native provider windows or documented model windows supersede synthetic task/shared caps. */
+  readonly contextPolicy?: (options: GenerateOptions) => 'provider' | 'model' | undefined
   /** Maximum concurrently consumed generation streams. */
   readonly maxActiveGenerations: number | (() => number)
   /** Hard estimated input-token limit; zero disables this check. A getter keeps live settings current. */
@@ -62,6 +65,7 @@ interface Waiter {
   readonly priority: number
   readonly cost: number
   readonly inputTokens: number
+  readonly contextPolicy?: 'provider' | 'model'
   readonly maxActiveGenerations: number
   readonly sequence: number
   readonly enqueuedAt: number
@@ -152,6 +156,7 @@ export class ResourceManager {
    * @returns a stream with bounded admission.
    */
   stream(ctx: Context, options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
+    const policy = this.config.contextPolicy?.(options)
     const estimated = estimateInputTokens(options)
     const hardContextTokens = this.hardContextTokens()
     const totalContextTokens = this.totalContextTokens()
@@ -159,14 +164,17 @@ export class ResourceManager {
     if (!Number.isSafeInteger(hardContextTokens) || hardContextTokens < 0) throw new TypeError('hardContextTokens must be a non-negative safe integer')
     if (!Number.isSafeInteger(totalContextTokens) || totalContextTokens < 0) throw new TypeError('totalContextTokens must be a non-negative safe integer')
     if (totalContextTokens > 0 && totalContextTokens < hardContextTokens) throw new TypeError('totalContextTokens cannot be below hardContextTokens unless it is zero')
-    if (hardContextTokens > 0 && estimated > hardContextTokens) {
+    if (policy === undefined && hardContextTokens > 0 && estimated > hardContextTokens) {
       throw this.rejection(options, `model request estimate ${estimated} tokens exceeds hard context limit ${hardContextTokens}`)
     }
     const budget = this.config.requestBudget?.(options)
     const safety = budget?.safetyReserveTokens ?? this.safetyReserveTokens
     const cost = estimated + (options.maxTokens ?? this.defaultOutputReserveTokens) + safety
-    if (budget !== undefined && cost > budget.contextTokens) throw this.rejection(options, `worker request cost ${cost} tokens exceeds assigned context budget ${budget.contextTokens}; return NEED_BUDGET to the parent`)
-    if (!Number.isSafeInteger(cost) || totalContextTokens > 0 && cost > totalContextTokens) throw this.rejection(options, `model request cost ${cost} tokens exceeds total context budget ${totalContextTokens}`)
+    if (policy !== 'provider' && budget !== undefined && cost > budget.contextTokens) {
+      if (policy === 'model') throw new LlmError(`Model context window exceeded: estimated input plus output/safety ${cost} tokens exceeds ${budget.contextTokens}`, CONTEXT_WINDOW_EXCEEDED_CODE)
+      throw this.rejection(options, `worker request cost ${cost} tokens exceeds assigned context budget ${budget.contextTokens}; return NEED_BUDGET to the parent`)
+    }
+    if (!Number.isSafeInteger(cost) || policy === undefined && totalContextTokens > 0 && cost > totalContextTokens) throw this.rejection(options, `model request cost ${cost} tokens exceeds total context budget ${totalContextTokens}`)
     const maxActiveGenerations = this.limitFor(estimated)
     const priority = options.sessionId !== undefined && ctx.agents.get(options.sessionId)?.session.header.origin === 'subagent' ? 1 : 0
     return this.consume({
@@ -176,6 +184,7 @@ export class ResourceManager {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       cost,
       inputTokens: estimated,
+      contextPolicy: policy,
       maxActiveGenerations,
     })
   }
@@ -262,6 +271,7 @@ export class ResourceManager {
     const hard = this.hardContextTokens()
     if (total > 0 || hard > 0) {
       for (const waiter of [...this.queue]) {
+        if (waiter.contextPolicy !== undefined) continue
         const reason = hard > 0 && waiter.inputTokens > hard
           ? `queued request input ${waiter.inputTokens} tokens exceeds updated hard context limit ${hard}`
           : total > 0 && waiter.cost > total ? `queued request cost ${waiter.cost} tokens exceeds updated total context budget ${total}` : undefined
@@ -305,7 +315,7 @@ export class ResourceManager {
 
   private canAdmit(input: Admission): boolean {
     return this.active < Math.min(this.maxActiveGenerations(), input.maxActiveGenerations, this.limitFor(input.inputTokens), ...this.activeLimits.values())
-      && (this.totalContextTokens() === 0 || this.activeContextTokens + input.cost <= this.totalContextTokens())
+      && (input.contextPolicy !== undefined || this.totalContextTokens() === 0 || this.activeContextTokens + input.cost <= this.totalContextTokens())
   }
 }
 

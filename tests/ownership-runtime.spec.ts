@@ -63,7 +63,7 @@ async function fixture(options: { exerciseTools?: boolean } = {}) {
   const owners = new Map<string, string>()
   let liveBharatcode = 0, peakBharatcode = 0
   class Adapter extends LlmAdapter {
-    override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
+    override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model, context: { contextWindow: 1_000_000 }, defaultMaxTokens: 32_000 } }
     override async modelInfo() { return { context: { contextWindow: 1_000_000 }, defaultMaxTokens: 32_000 } }
     override async *stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
       requests.push(request)

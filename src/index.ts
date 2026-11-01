@@ -13,7 +13,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MAX_CONTEXT_TOKENS } from './adaptive.js'
 import { BackgroundRuns, type BackgroundSnapshot } from './background-runs.js'
 import { ChildLane } from './child-lane.js'
-import { resolveWorkerBudget } from './budget-policy.js'
+import { resolveWorkerBudget, contextPolicyForModel, bindRequestBudget } from './budget-policy.js'
 import { ResourceManager, validateContextConcurrency } from './resource-manager.js'
 import { readPlan, positiveInteger } from './validation.js'
 import { runPlan, OrchestrationRunId, type RunnerPolicy, type Checkpoint } from './runner.js'
@@ -260,15 +260,17 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
   resolvePolicy()
-  interface ChildLaunchContext { task: PlannedTask; restriction?: ToolRestriction; onModel?: (model: TaskModel) => void }
+  interface ChildLaunchContext { task: PlannedTask; restriction?: ToolRestriction; onModel?: (model: TaskModel) => void; assignedModel?: { provider: string; model: string } }
   const budgetContext = new AsyncLocalStorage<ChildLaunchContext>()
   const budgets = new Map<SessionId, PlannedTask>()
+  const assignedModels = new Map<SessionId, { provider: string; model: string }>()
   const modelObservers = new Map<SessionId, (model: TaskModel) => void>()
   const budgetFailures = new Map<SessionId, string>()
   ctx.on('agent/created', ({ agent }) => {
     const launch = budgetContext.getStore()
     if (launch !== undefined && agent.session.header.origin === 'subagent') {
       budgets.set(agent.session.id, launch.task)
+      if (launch.assignedModel !== undefined) assignedModels.set(agent.session.id, launch.assignedModel)
       if (launch.onModel !== undefined) modelObservers.set(agent.session.id, launch.onModel)
       if (launch.restriction !== undefined) agent.ctx.tools.restrict(launch.restriction)
       else {
@@ -281,18 +283,20 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.on('agent/disposed', ({ agent }) => {
     budgets.delete(agent.session.id)
+    assignedModels.delete(agent.session.id)
     modelObservers.delete(agent.session.id)
     const running = runs.active(agent.id)
     if (running !== undefined) runs.cancel(agent.id, running.runId)
   })
   const resources = new ResourceManager({
+    contextPolicy: options => contextPolicyForModel(options.provider, options.model),
     maxActiveGenerations: () => get('maxActiveGenerations'),
     hardContextTokens: () => get('hardContextTokens'), totalContextTokens: () => get('totalContextTokens'),
     concurrencyByContext: () => get('concurrencyByContext'), priorityAgingMs: get('priorityAgingMs'),
     defaultOutputReserveTokens: get('defaultOutputReserveTokens'), safetyReserveTokens: get('requestSafetyReserveTokens'),
     requestBudget: options => {
       const task = options.sessionId === undefined ? undefined : budgets.get(options.sessionId)
-      return task === undefined ? undefined : { contextTokens: task.contextBudget!, safetyReserveTokens: task.safetyReserveTokens! }
+      return task === undefined || options.sessionId === undefined ? undefined : bindRequestBudget(assignedModels.get(options.sessionId), options, { contextTokens: task.contextBudget!, safetyReserveTokens: task.safetyReserveTokens! })
     },
     onRejectedRequest: (options, reason) => {
       if (options.sessionId !== undefined && budgets.has(options.sessionId)) budgetFailures.set(options.sessionId, reason)
@@ -354,10 +358,11 @@ export function apply(ctx: Context, config: Config): void {
         if (model === undefined) throw new Error('Choose a worker model before dispatch')
         const info = await ctx.llm.resolveModelInfo(model.provider, model.model, exec.signal)
         const raw = rawTasks.find(item => item.id === task.id)!
-        const taskOverrides = get('respectTaskBudgets')
-        const budget = resolveWorkerBudget({ contextWindow: info.context?.contextWindow, defaultMaxTokens: info.defaultMaxTokens }, {
-          contextBudget: taskOverrides && raw.contextBudget !== undefined ? raw.contextBudget as number
-            : Math.min(get('workerContextTokens'), info.context?.contextWindow ?? get('workerContextTokens')),
+        const automaticContext = contextPolicyForModel(model.provider, model.model)
+        const taskOverrides = automaticContext === undefined && get('respectTaskBudgets')
+        const budget = resolveWorkerBudget({ provider: model.provider, model: model.model, contextWindow: info.context?.contextWindow, defaultMaxTokens: info.defaultMaxTokens }, {
+          ...(automaticContext === undefined ? { contextBudget: taskOverrides && raw.contextBudget !== undefined ? raw.contextBudget as number
+            : Math.min(get('workerContextTokens'), info.context?.contextWindow ?? get('workerContextTokens')) } : {}),
           ...(taskOverrides && raw.outputReserveTokens !== undefined ? { outputReserveTokens: raw.outputReserveTokens as number }
             : get('workerOutputTokens') > 0 ? { outputReserveTokens: get('workerOutputTokens') } : {}),
           ...(taskOverrides && raw.safetyReserveTokens !== undefined ? { safetyReserveTokens: raw.safetyReserveTokens as number } : {}),
@@ -395,7 +400,7 @@ export function apply(ctx: Context, config: Config): void {
           // This permit covers child lifetime, not merely individual model streams.
           const release = request.agentOptions?.provider === 'bharatcode' ? await bharatcodeLane.acquire(request.signal) : () => {}
           try {
-            return await budgetContext.run({ task, restriction, onModel }, async () => {
+            return await budgetContext.run({ task, restriction, onModel, assignedModel: request.agentOptions?.provider && request.agentOptions.model ? { provider: request.agentOptions.provider, model: request.agentOptions.model } : undefined }, async () => {
               const activation = await ctx.subagents.startActivation({
                 provider: get('subagentProvider'), label: request.agentOptions?.provider && request.agentOptions.model
                   ? `${task.owner} · ${formatTaskModel({ provider: request.agentOptions.provider, model: request.agentOptions.model, reasoningEffort: request.agentOptions.reasoningEffort })} · ${task.title}`

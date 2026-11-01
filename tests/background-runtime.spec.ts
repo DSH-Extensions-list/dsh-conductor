@@ -22,7 +22,7 @@ describe('background production runtime', () => {
     const tasks = ['one', 'two'].map(id => ({ id, owner: `${id}-author`, title: id, role: 'backend', prompt: `Inspect ${id}`, dependsOn: [], readOnly: true, writeScopes: [], contextBudget: 24_576, outputReserveTokens: 2_048 }))
     const plan = { summary: 'Independent checks', risk: 'low', requiresConfirmation: false, tasks: [...tasks, { ...tasks[0], id: 'review', owner: 'reviewer', title: 'Review evidence', role: 'reviewer', dependsOn: ['one', 'two'] }] }
     class Adapter extends LlmAdapter {
-      override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
+      override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model, context: { contextWindow: 1_000_000 }, defaultMaxTokens: 32_000 } }
       override async modelInfo() { return { context: { contextWindow: 1_000_000 }, defaultMaxTokens: 32_000 } }
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         requests.push(options)

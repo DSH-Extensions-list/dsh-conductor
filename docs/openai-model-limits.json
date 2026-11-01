@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "description": "Exact configured model IDs verified against official OpenAI model pages; API capacities are not account-specific Codex subscription entitlements.",
+  "retrievedAt": "2026-11-01",
+  "tokenUnit": "tokens",
+  "models": {
+    "gpt-5.6-luna": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-5.6-sol": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-5.6-terra": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-6-astra": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-6-luna": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-6-sol": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6-sol",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-6.1-sol": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": 500000,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": "GPT-6.1 Sol uses a default context window of 500K tokens in Codex and ChatGPT Work.",
+      "dynamicAlias": false
+    },
+    "gpt-6.1-terra": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": false
+    },
+    "gpt-daybreak-blue-latest": {
+      "apiContextWindowTokens": 1050000,
+      "apiMaxOutputTokens": 128000,
+      "codexAndWorkDefaultContextWindowTokens": null,
+      "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest",
+      "retrievedAt": "2026-11-01",
+      "apiEvidence": "1,050,000 context window; 128,000 max output tokens",
+      "codexAndWorkEvidence": null,
+      "dynamicAlias": true
+    }
+  },
+  "unverifiedConfiguredModelIds": [],
+  "oModelCoverage": "No o-series model IDs were present in the sanitized configured model catalogue; no o-series limits are inferred.",
+  "installedCodexAdapter": {
+    "package": "dsh-plugin-subscriptions",
+    "version": "0.9.10",
+    "sourceArtifact": "lib/index.js",
+    "genericFallbackContextWindowTokens": 400000,
+    "genericDefaultOutputReserveTokens": 128000,
+    "contextDiscoveryFields": [
+      "context_window",
+      "max_context_window"
+    ],
+    "contextResolution": "default = discovered.contextWindow ?? configured.contextWindow ?? 400000; max = discovered.maxContextWindow ?? default; effective = min(savedPreference ?? default, max)",
+    "outputWireEnforcement": "codexRequestBody does not serialize GenerateOptions.maxTokens; 128000 is reported metadata/local reserve, not independently verified wire enforcement.",
+    "sourceLines": {
+      "constants": "5109-5110",
+      "discovery": "5490-5491",
+      "resolveOwnModel": "5815-5832",
+      "contextLimitsAndOverride": "5835-5849",
+      "requestBody": "5596-5618"
+    },
+    "accountSpecificMetadataFetched": false
+  }
+}

@@ -1,6 +1,5 @@
 /** Model-facing plan and report fields. @module */
 import { TASK_ROLES } from './types.js'
-import { CONTEXT_TIERS } from './adaptive.js'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 
 export const TOOL_PLAN_SCHEMA = {
@@ -26,7 +25,7 @@ export const TOOL_PLAN_SCHEMA = {
           dependsOn: { type: 'array', items: { type: 'string' }, required: true },
           readOnly: { type: 'boolean', required: true },
           writeScopes: { type: 'array', items: { type: 'string' }, required: true },
-          contextBudget: { type: 'integer', enum: [...CONTEXT_TIERS] },
+          contextBudget: { type: 'integer', description: 'Positive combined context capacity; automatic policies resolve the exact model window.' },
           outputReserveTokens: { type: 'integer' },
           safetyReserveTokens: { type: 'integer' },
           taskPackage: {
@@ -68,7 +67,7 @@ export const WORKER_SCHEMA: ObjectJsonSchema = {
         properties: {
           kind: { type: 'string', enum: ['NEED_FILE', 'NEED_HISTORY', 'NEED_MORE_CONTEXT', 'NEED_DEPENDENCY', 'NEED_BUDGET', 'NEED_TOOL_RESULT', 'NEED_MORE_TOOL', 'NEED_REVIEW'] },
           reason: { type: 'string' },
-          requestedContextTokens: { type: 'integer', enum: [...CONTEXT_TIERS] },
+          requestedContextTokens: { type: 'integer' },
         },
         required: ['kind', 'reason'],
         additionalProperties: false,

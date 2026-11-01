@@ -1,5 +1,4 @@
 /** Parse model-authored plans and child reports before scheduling. @module */
-import { MAX_CONTEXT_TOKENS } from './adaptive.js'
 import { TASK_ROLES, type PlannedTask, type TaskPlan, type WorkerReport, type ReviewReport, type WorkerNeed } from './types.js'
 
 /** Require an object from model or durable JSON. */
@@ -50,7 +49,6 @@ export function readPlan(value: unknown, maxChars: number, deferBudgetFit = fals
       outputReserveTokens: positiveInteger(item.outputReserveTokens ?? 32_000, 'outputReserveTokens'),
       safetyReserveTokens: positiveInteger(item.safetyReserveTokens ?? 1_024, 'safetyReserveTokens'),
     }
-    if (task.contextBudget! > MAX_CONTEXT_TOKENS) throw new TypeError(`${task.id}: unsupported contextBudget`)
     if (!deferBudgetFit && task.outputReserveTokens! + task.safetyReserveTokens! >= task.contextBudget!) throw new TypeError(`${task.id}: reserves leave no input context`)
     if (task.readOnly && task.writeScopes.length !== 0) throw new TypeError(`${task.id}: read-only task cannot declare writes`)
     if (!task.readOnly && (task.writeScopes.length === 0 || task.writeScopes.some(scope => scope.trim().length === 0))) throw new TypeError(`${task.id}: write task must declare writeScopes`)

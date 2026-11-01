@@ -1,6 +1,6 @@
 {
   "name": "dsh-conductor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Background Sol orchestration with full-context DeepSeek workers and independent review.",
   "author": {
     "name": "DSH Extensions"
@@ -48,7 +48,9 @@
     "CHANGELOG.md",
     "VERIFICATION.md",
     "SECURITY.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "docs/openai-model-limits.json",
+    "docs/openai-context-policy.md"
   ],
   "publishConfig": {
     "access": "public"

@@ -9,7 +9,7 @@ describe('worker budget policy', () => {
   })
   it('caps context to known smaller model capacity and preserves its declared output', () => {
     expect(resolveWorkerBudget({ contextWindow: 262_144, defaultMaxTokens: 16_384 })).toEqual({ contextBudget: 262_144, outputReserveTokens: 16_384, safetyReserveTokens: 1_024 })
-    expect(resolveWorkerBudget({ contextWindow: 2_000_000, defaultMaxTokens: 32_000 }).contextBudget).toBe(1_000_000)
+    expect(resolveWorkerBudget({ contextWindow: 2_000_000, defaultMaxTokens: 32_000 }).contextBudget).toBe(2_000_000)
   })
   it('uses explicit conservative fallbacks only for absent metadata', () => {
     expect(resolveWorkerBudget({})).toEqual({ contextBudget: 1_000_000, outputReserveTokens: 32_000, safetyReserveTokens: 1_024 })
