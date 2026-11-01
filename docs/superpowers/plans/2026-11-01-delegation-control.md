@@ -9,6 +9,6 @@
 - [x] Add provider-first shared admission and same-plan BharatCode fairness regressions.
 - [x] Verify trusted Muse actually attempts a spawn and runtime rejects it with `root_capacity_exhausted`, without creating or queuing a child.
 - [x] Run full checks/live acceptance, review, package, install when idle, and verify installed settings.
-- [ ] Publish source, release package, routing guide, and verification evidence.
+- [x] Publish source, release package, routing guide, and verification evidence.
 
 **Boundaries:** Slot limits govern Conductor admission and the official Muse agent tree. General shell execution is not a universal sandbox against a malicious agent manually implementing a new external model client; retain official CLI sandboxing and credential restrictions. Task-fit recommendations are advisory, not a benchmark ranking.
