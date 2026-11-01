@@ -11,6 +11,6 @@
 - [x] Register catalog tool; validate exact available models/reasoning before dispatch and expose unavailable-route diagnostics.
 - [x] Integrate native and CLI transports under the same queue and owned cancellation/message/status lifecycle.
 - [x] Exercise mixed-model routing, read-only/authorized file writes, review, failure, cancellation, and queue recovery through the real DSH runtime plus live Muse CLI.
-- [ ] Run repository checks, review changes, package/install when idle, and verify actual model-facing tool schemas and end-to-end results in the installed runtime.
+- [x] Run repository checks, review changes, package/install when idle, and verify actual model-facing tool schemas and end-to-end results in the installed runtime.
 
 **Review focus:** misleading catalog availability, implicit fallback models, changed resume routes, dead CLI processes retaining permits, and oversized/malformed CLI results. Add tests for each at its owning seam.
