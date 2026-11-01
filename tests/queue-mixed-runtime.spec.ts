@@ -35,20 +35,24 @@ function graph(owner: string) {
     { ...worker, id: `${owner}-review`, owner: `${owner}-reviewer`, role: 'reviewer', dependsOn: [worker.id], model: { provider: 'codex', model: 'review' } }] }
 }
 
-async function fixture(mode: 'cancel' | 'nonzero' | 'schema') {
+async function fixture(mode: 'cancel' | 'nonzero' | 'schema' | 'concurrent') {
   const root = await mkdtemp(join(tmpdir(), 'conductor-mixed-queue-')), ctx = new Context()
   const prior = process.env.XDG_CONFIG_HOME
   const executable = join(root, 'fake-muse'), pidFile = join(root, 'pid'), releaseFile = join(root, 'release'), terminatingFile = join(root, 'terminating')
   const parents = new Map<string, Agent>(), actions = new Map<string, { name: string; args: object }>()
-  const terminal = new Map(['alpha', 'beta'].map(owner => [owner, deferred<string>()]))
+  const ownerNames = mode === 'concurrent' ? ['alpha', 'beta', 'gamma', 'delta', 'epsilon'] : ['alpha', 'beta']
+  const terminal = new Map(ownerNames.map(owner => [owner, deferred<string>()]))
+  const nativeGates = new Map(ownerNames.map(owner => [owner, deferred<void>()]))
+  const activeNative = new Set<string>()
+  let peakNative = 0, peakBharatcode = 0
   const native: Array<{ task: string; museExited: boolean }> = []
   const nativeStarted = deferred<void>()
   class Adapter extends LlmAdapter {
-    override async listModels() { return ['lead', 'gpt-6-luna', 'review'].map(id => ({ provider: 'codex', id, name: id })) }
+    override async listModels(provider: string) { return (provider === 'bharatcode' ? ['worker'] : ['lead', 'gpt-6-luna', 'review']).map(id => ({ provider, id, name: id })) }
     override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model, context: { contextWindow: 1_000_000 }, defaultMaxTokens: 32_000 } }
     override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
       if (options.model === 'lead') {
-        const owner = String(options.sessionId).includes('alpha') ? 'alpha' : 'beta'
+        const owner = ownerNames.find(owner => String(options.sessionId).endsWith(owner))!
         const action = actions.get(owner)
         if (action !== undefined) { actions.delete(owner); yield* tool(action.name, action.args, `${owner}-${action.name}`) }
         else {
@@ -65,6 +69,7 @@ async function fixture(mode: 'cancel' | 'nonzero' | 'schema') {
       let museExited = false
       try { process.kill(pid, 0) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') museExited = true; else throw error }
       native.push({ task, museExited }); nativeStarted.resolve()
+      if (mode === 'concurrent' && !task.endsWith('-review')) await nativeGates.get(task.split('-')[0]!)!.promise
       const report = task.endsWith('-review') ? { status: 'approved', summary: 'Reviewed native evidence', findings: [], checks: ['route checked'], nextSteps: [] }
         : { taskId: task, status: 'completed', summary: 'Native task checked', evidence: ['native route'], changedFiles: [], tests: [], blockers: [], nextSteps: [] }
       yield* tool('structured_output', report, `${task}-result`)
@@ -81,26 +86,75 @@ const event=(type,payload)=>console.log(JSON.stringify({schema_version:1,record_
 event('runtime.command.accepted',{kind:'command_accepted',command_kind:'turn.submit'});event('session.run.linked',{kind:'session_run_linked'});event('run.model.configured',{kind:'run_model_configured',provider_id:'meta',model_id:a[a.indexOf('--model')+1]});event('run.lifecycle.started',{kind:'run_started'});
 process.on('SIGTERM',()=>fs.writeFileSync(${JSON.stringify(terminatingFile)},'received'));
 const timer=setInterval(()=>{if(!fs.existsSync(release))return;clearInterval(timer);
+if(mode==='concurrent')console.log(JSON.stringify({schema_version:1,record_type:'event',stream:{kind:'session',id:'session-main'},payload_type:'run.terminal.completed',payload:{command_id:'command-main',run_stream:{kind:'run',id:'run-main'},kind:'run_terminal',terminal:'completed',text:JSON.stringify({taskId:'alpha-worker',status:'completed',summary:'Muse checked',evidence:['fixture'],changedFiles:[],tests:[],blockers:[],nextSteps:[]})}}));
 if(mode==='schema')console.log(JSON.stringify({schema_version:1,record_type:'event',stream:{kind:'session',id:'session-main'},payload_type:'run.terminal.completed',payload:{command_id:'command-main',run_stream:{kind:'run',id:'run-main'},kind:'run_terminal',terminal:'completed',text:JSON.stringify({taskId:'wrong-task',status:'completed'})}}));
 process.exit(mode==='nonzero'?7:0)},5);
 `, { mode: 0o700 })
     process.env.XDG_CONFIG_HOME = root
     await mountAgentLoopTestDependencies(ctx, { tools: { mode: 'native' }, workingDirectory: true })
     await ctx.plugin(Subagents); await ctx.plugin(Spawn, { providerName: 'spawn' }); await ctx.plugin(Todo, { allowParallelInProgress: true })
-    await ctx.plugin(Conductor, { backgroundMode: true, minParallelTasks: 1, maxConcurrentAgents: 1, maxActiveGenerations: 1, museExecutable: executable, subagentLlmProvider: 'codex', subagentModel: 'gpt-6-luna', reviewerProvider: 'codex', reviewerModel: 'review' } as Conductor.ConfigValues)
-    const harness = await mountAgentLoopTestHarness(ctx); ctx.llm.registerAdapter(['codex'], new Adapter())
-    for (const owner of ['alpha', 'beta']) parents.set(owner, await harness.create(SessionId(`mixed-queue-${owner}`), { provider: 'codex', model: 'lead' }, { cwd: root }))
+    await ctx.plugin(Conductor, { backgroundMode: true, minParallelTasks: 1, ...(mode === 'concurrent' ? {} : { maxConcurrentAgents: 1, maxActiveGenerations: 1 }), museExecutable: executable, subagentLlmProvider: 'codex', subagentModel: 'gpt-6-luna', reviewerProvider: 'codex', reviewerModel: 'review' } as Conductor.ConfigValues)
+    ctx.on('agent/created', ({ agent }) => {
+      if (agent.session.header.origin !== 'subagent') return
+      activeNative.add(String(agent.id)); peakNative = Math.max(peakNative, activeNative.size)
+      peakBharatcode = Math.max(peakBharatcode, ctx.agents.list().filter(child => activeNative.has(String(child.id)) && child.options.provider === 'bharatcode').length)
+    })
+    ctx.on('agent/disposed', ({ agent }) => { activeNative.delete(String(agent.id)) })
+    const harness = await mountAgentLoopTestHarness(ctx); ctx.llm.registerAdapter(['codex', 'bharatcode'], new Adapter())
+    for (const owner of ownerNames) parents.set(owner, await harness.create(SessionId(`mixed-queue-${owner}`), { provider: 'codex', model: 'lead' }, { cwd: root }))
     const sendMessage = vi.spyOn(ctx.subagents, 'sendMessage')
     const command = async (owner: string, name: string, args: object = {}) => {
       actions.set(owner, { name, args }); parents.get(owner)!.followup(user(`Run ${name}.`)); await parents.get(owner)!.whenIdle()
     }
-    return { root, pidFile, releaseFile, terminatingFile, parents, terminal, native, nativeStarted, sendMessage, command,
-      async dispose() { await writeFile(releaseFile, 'release'); await ctx.fiber.dispose(); if (prior === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = prior; await rm(root, { recursive: true, force: true }) },
+    return { root, pidFile, releaseFile, terminatingFile, parents, terminal, native, nativeStarted, sendMessage, command, nativeGates,
+      get peakNative() { return peakNative }, get peakBharatcode() { return peakBharatcode },
+      async dispose() { for (const gate of nativeGates.values()) gate.resolve(); await writeFile(releaseFile, 'release'); await ctx.fiber.dispose(); if (prior === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = prior; await rm(root, { recursive: true, force: true }) },
     }
   } catch (error) { await ctx.fiber.dispose(); if (prior === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = prior; await rm(root, { recursive: true, force: true }); throw error }
 }
 
 describe('shared native/Muse child queue through the production runtime', () => {
+  it('runs Luna and Muse beside one BharatCode while another owner queues, using default shared capacity three', async () => {
+    const f = await fixture('concurrent')
+    const assigned = (owner: string) => {
+      const plan = graph(owner)
+      if (owner === 'beta' || owner === 'gamma') {
+        for (const task of plan.tasks) task.model = { provider: 'bharatcode', model: 'worker' }
+      }
+      return plan
+    }
+    try {
+      await f.command('alpha', 'conductor_dispatch', { objective: 'Inspect alpha', plan: assigned('alpha') })
+      await waitForFile(f.pidFile)
+      await f.command('beta', 'conductor_dispatch', { objective: 'Inspect beta', plan: assigned('beta') })
+      await vi.waitFor(() => expect(f.native.map(child => child.task)).toContain('beta-worker'))
+      await f.command('gamma', 'conductor_dispatch', { objective: 'Inspect gamma', plan: assigned('gamma') })
+      await f.command('delta', 'conductor_dispatch', { objective: 'Inspect delta', plan: assigned('delta') })
+      await vi.waitFor(() => expect(f.native.map(child => child.task)).toContain('delta-worker'))
+      expect(f.native.map(child => child.task)).toEqual(['beta-worker', 'delta-worker'])
+      expect(f.native.every(child => !child.museExited)).toBe(true)
+      await f.command('epsilon', 'conductor_dispatch', { objective: 'Inspect epsilon', plan: assigned('epsilon') })
+      expect(f.native.map(child => child.task)).not.toContain('epsilon-worker')
+      // Completing Luna frees shared capacity while both BharatCode owners retain their ordering.
+      f.nativeGates.get('delta')!.resolve()
+      await vi.waitFor(() => expect(f.native.map(child => child.task)).toContain('epsilon-worker'))
+      expect(f.native.map(child => child.task)).not.toContain('gamma-worker')
+      f.nativeGates.get('epsilon')!.resolve()
+      expect(await f.terminal.get('delta')!.promise).toBe('completed')
+      expect(await f.terminal.get('epsilon')!.promise).toBe('completed')
+      f.nativeGates.get('beta')!.resolve()
+      await vi.waitFor(() => expect(f.native.map(child => child.task)).toContain('gamma-worker'))
+      f.nativeGates.get('gamma')!.resolve()
+      expect(await f.terminal.get('beta')!.promise).toBe('completed')
+      expect(await f.terminal.get('gamma')!.promise).toBe('completed')
+      expect(f.peakBharatcode).toBe(1)
+      // Muse remains alive throughout all native work, so native peak plus Muse is the global peak.
+      expect(f.peakNative + 1).toBe(3)
+      await writeFile(f.releaseFile, 'release')
+      expect(await f.terminal.get('alpha')!.promise).toBe('completed')
+    } finally { await f.dispose() }
+  }, 10000)
+
   it('holds another owner until cancelled Muse has exited, and gives explicit external messaging guidance', async () => {
     const f = await fixture('cancel')
     try {

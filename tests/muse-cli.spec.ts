@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, writeFile, readFile, rm, mkdir, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { homedir } from 'node:os'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { PlannedTask } from '../src/types.js'
 import { WORKER_SCHEMA } from '../src/schemas.js'
@@ -43,6 +46,17 @@ describe('official Muse CLI adapter', () => {
     expect(observed).toHaveBeenCalledWith({provider:'muse',model:'muse-spark-1.3',reasoningEffort:'low'})
     await run.dispose(); await run.dispose()
     await expect(access(capture.args[capture.args.indexOf('--prompt-file')+1])).rejects.toThrow()
+  })
+  it('forces a one-root Muse execution tree and disables workflows and observers per run', async () => {
+    const f=await setup(); const run=await startMuseTask(f.request,task,{executable:f.executable})
+    expect((await run.result).stopReason).toBe('completed')
+    const {args}=await f.capture(); const overrides=args.flatMap((value:string,index:number)=>value==='--config'?[args[index+1]]:[])
+    expect(overrides).toContain('agents.execution_capacity=1')
+    expect(overrides).toContain('run.workflow_trigger_mode="off"')
+    expect(overrides).toContain('local_session_messaging.enabled=false')
+    const capabilities=JSON.parse(overrides.find((v:string)=>v.startsWith('runtime_capabilities='))?.split('=').slice(1).join('=')??'{}')
+    for(const name of ['goal-reminder','memory','scope-reminder','skill-reminder','todo-reminder','verify-reminder'])expect(capabilities[`plugin:tbh-reminders:reminder:${name}`]).toEqual({enabled:false})
+    expect(args).toContain('--disable-reminders');await run.dispose()
   })
   it('adapts optional WorkerReport fields to strict nullable wire fields and restores omission',async()=>{
     const f=await setup(`event('run.terminal.completed',{kind:'run_terminal',terminal:'completed',text:JSON.stringify({taskId:'muse',status:'needs_more_context',summary:'Need a file',evidence:[],changedFiles:[],tests:[],blockers:[],nextSteps:[],needs:[{kind:'NEED_FILE',reason:'Missing file',requestedContextTokens:null}]})});`)
@@ -160,4 +174,25 @@ describe('official Muse CLI adapter', () => {
     expect(await probeMuseCli(f.executable)).toMatchObject({available:true,version:'Muse Code 1.4.14 (1.4.14-R7309.1)',reason:expect.stringMatching(/entitlement.*not|not.*entitlement/i)})
     expect(await probeMuseCli(join(f.root,'missing'))).toMatchObject({available:false})
   })
+  it.skipIf(process.env.CONDUCTOR_MUSE_LIVE!=='1')('official trusted-workspace runtime rejects an actual spawn attempt without child admission',async()=>{
+    const root=await mkdtemp(join(tmpdir(),'conductor-no-nesting-live-'));roots.push(root)
+    const outputSchema={type:'object',properties:{attempted:{type:'boolean'},blocked:{type:'boolean'},reason:{type:'string'}},required:['attempted','blocked','reason'],additionalProperties:false}
+    const schemaPath=join(root,'result.schema.json');await writeFile(schemaPath,JSON.stringify(outputSchema))
+    const env={...process.env};for(const k of ['META_API_KEY','MODEL_API_KEY','MUSE_API_KEY','MUSE_AUTH_PATH'])delete env[k]
+    const capabilities=Object.fromEntries(['goal-reminder','memory','scope-reminder','skill-reminder','todo-reminder','verify-reminder'].map(n=>[`plugin:tbh-reminders:reminder:${n}`,{enabled:false}]))
+    const {stdout}=await promisify(execFile)(join(homedir(),'.local','bin','muse'),['exec','--json','--provider','meta','--model','muse-spark-1.3','--workspace',root,'--trust-workspace','--reasoning-effort','low','--output-schema',schemaPath,'--disable-write','--disable-shell','--disable-request-user-input','--disable-reminders','--no-foreign-personal-context','--no-session-log','--contributor-mode','off','--max-model-steps','5','--config','agents.execution_capacity=1','--config','run.workflow_trigger_mode="off"','--config','local_session_messaging.enabled=false','--config','runtime_capabilities='+JSON.stringify(capabilities),'This is an admission-control test. Attempt exactly one native subagent_spawn call asking a child to reply QUEUE_BYPASS. Root capacity is one. Do not work around a refusal or use shell, workflows or another client. attempted is true only if you called the tool; blocked is true only for a runtime refusal. Quote the exact refusal in reason, then return structured output.'],{env,timeout:60000,maxBuffer:8*1024*1024})
+    const events=stdout.split('\n').filter(Boolean).map(l=>JSON.parse(l))
+    const terminal=events.find(e=>e.payload_type==='run.terminal.completed')
+    const result=JSON.parse(terminal?.payload.text??'null')
+    expect(result).toMatchObject({attempted:true,blocked:true})
+    expect(result.reason).toContain('root_capacity_exhausted')
+    const spawn=events.find(e=>e.payload_type==='tool.result'&&e.payload.correlation_facts?.tool_name==='subagent_spawn')
+    const refusal=JSON.parse(spawn?.payload.text??'null')
+    expect(refusal).toMatchObject({status:'rejected',reason:'root_capacity_exhausted'})
+    expect(refusal.hint).toMatch(/no agent was created or queued/i)
+    const usage=events.find(e=>e.payload_type==='run.usage')?.payload
+    expect(usage?.children_included).toBe(false)
+    expect(events.filter(e=>e.payload_type==='run.model.configured')).toHaveLength(1)
+  },65000)
+
 })

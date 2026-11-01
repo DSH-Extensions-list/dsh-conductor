@@ -142,6 +142,13 @@ export async function startMuseTask(request: SubagentStartRequest, task: Planned
     const args = ['exec', '--json', '--prompt-file', promptFile, '--output-schema', schemaFile, '--workspace', cwd,
       '--provider', 'meta', '--model', model, '--contributor-mode', 'off', '--no-foreign-personal-context', '--no-session-log',
       '--max-model-steps', '40', '--disable-request-user-input', '--disable-reminders',
+      '--config', 'agents.execution_capacity=1',
+      '--config', 'run.workflow_trigger_mode="off"',
+      '--config', 'local_session_messaging.enabled=false',
+      '--config', 'runtime_capabilities=' + JSON.stringify(Object.fromEntries(
+        ['goal-reminder', 'memory', 'scope-reminder', 'skill-reminder', 'todo-reminder', 'verify-reminder']
+          .map(name => [`plugin:tbh-reminders:reminder:${name}`, { enabled: false }]),
+      )),
       ...(reasoningEffort === undefined ? [] : ['--reasoning-effort', reasoningEffort]),
       ...(task.readOnly ? ['--disable-write', '--disable-shell'] : ['--approval-mode', 'never']),
     ]

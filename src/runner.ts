@@ -232,6 +232,8 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
   const limitFor = (task: PlannedTask): number => policy.concurrencyByContext.find(tier => task.contextBudget! <= tier.maxContextTokens)?.maxActiveGenerations ?? 1
   const canStart = (task: PlannedTask): boolean => {
     const active = result.plan.tasks.filter(task => running.has(task.id))
+    // Keep provider waiters out of the run's shared scheduling slots as well.
+    if (modelFor(task)?.provider === 'bharatcode' && active.some(sibling => modelFor(sibling)?.provider === 'bharatcode')) return false
     if (active.length >= Math.min(policy.maxConcurrentAgents, limitFor(task), ...active.map(limitFor))) return false
     if (!task.readOnly && active.some(sibling => !sibling.readOnly && (!policy.allowParallelWrites || sibling.writeScopes.some(scope => task.writeScopes.some(other => scopesOverlap(scope, other)))))) return false
     return true

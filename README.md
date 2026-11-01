@@ -22,20 +22,20 @@ Muse subscription tasks run through `muse exec` with account login. They never u
 
 The CLI owns its context, compaction, and output policy; native DSH token-budget fields are not applied to it. A task result must be a schema-valid final report from the matching root CLI run with a successful exit. Read-only tasks disable filesystem writes and shell; authorized editing tasks keep the CLI sandbox and disable interactive approval prompts. The current process-tree supervision requires Linux.
 
-The configured child queue is shared across native and external workers, including reviewers. Its default capacity is one. The existing single-child BharatCode admission is also preserved. Conductor frees an external slot only after the CLI's owned process group is stopped and cleanup finishes. If process cleanup cannot be established, the lane closes and reports failure rather than admitting another process.
+The configured child queue is shared across native and external workers, including reviewers. Its default capacity is three, with a separate hard limit of one BharatCode child. The existing single-child BharatCode admission is also preserved. Conductor frees an external slot only after the CLI's owned process group is stopped and cleanup finishes. If process cleanup cannot be established, the lane closes and reports failure rather than admitting another process.
 
 `conductor_status` retains the selected/observed model, task evidence, and failures. `conductor_cancel` requests termination of an owned CLI run; its slot stays occupied until process cleanup finishes. The CLI transport does not support live steering through `conductor_message`: cancel, wait for disposal, and resume the saved task with `resumeContext`. Conductor never invents delivery or falls back to another model.
 
-The queue covers Conductor-managed children. Muse's own built-in subagent tools are not controlled by DSH's tool guards; the handoff forbids nested delegation, but enforcement inside the official client remains owned by Muse. External shell processes and other plugins likewise remain outside Conductor's scheduling authority.
+Muse now receives a runtime execution capacity of one (including its root), with workflow launches, local session messaging and observers disabled. Native spawning is rejected even if the model asks for it. Conductor also guards its coordinator's direct native delegation tools. See [the model assignment guide](docs/model-routing.md) for the tested controls, task differentiation, sources, and shell/security boundaries.
 
 ## Defaults
 
 The package preset selects **Codex / GPT-6.1 Sol / Medium** for the coordinator and final reviewer, and **BharatCode / DeepSeek v4.1 Flash** for workers. These routes must already exist in your DSH profile. All three roles have model and reasoning selectors in **Settings → Conductor**. Choose other available routes there; unsupported selections fail visibly rather than silently substituting a model.
 
 - Background dispatch returns an accepted run ID immediately. The coordinator can answer another prompt while the run remains pending.
-- By default, one Conductor-managed child is admitted at a time across conversations and model transports; BharatCode additionally retains its single-child admission. The permit lasts through child disposal, not just one API response. Extra tasks queue. The lead remains outside the child queue; final reviewers retain their dependency gates and share child admission.
+- By default, up to three Conductor-managed children run across conversations and model transports, while BharatCode retains a hard single-child admission limit. The permit lasts through child disposal, not just one API response. Extra tasks queue. The lead remains outside the child queue; final reviewers retain their dependency gates and share child admission.
 - DeepSeek workers use their **1,000,000-token provider window** with no additional Conductor task/shared-context rejection, plus the selected adapter's complete configured per-response output allowance. The current BharatCode declaration is **32,000 output tokens**, not an independently measured backend maximum. Conductor ignores obsolete model-authored context caps such as 98K/114K for DeepSeek and GPT. GPT uses exact documented OpenAI model ceilings and any smaller route-reported capacity, rather than a blanket 1M clamp. See [verified GPT limits](docs/openai-context-policy.md).
-- Native full-access workers, including reviewers, receive all tools available in their preset plus `danger-full-access` / `approval: never`. Review-only assignments are instructions, not filesystem confinement. Nested delegation tools are guarded so they cannot bypass the single-child queue. Other plugins and external processes are outside that queue.
+- Native full-access workers, including reviewers, receive all tools available in their preset plus `danger-full-access` / `approval: never`. Review-only assignments are instructions, not filesystem confinement. Nested delegation tools are guarded so they cannot bypass the provider-aware queue. Other plugins and external processes are outside that queue.
 - Native Fleet/subagent names include the selected provider, model and reasoning level. Queued task rows mark that selection as assigned; once a model request starts, TODO/status records its actual route. Completed tasks retain their recorded model even after selector changes, and old checkpoints without model evidence stay unknown.
 - Final review is required by default. Success requires every task's structured evidence and an approved review. Failures, cancellation and missing context are reported with partial evidence.
 
@@ -46,7 +46,7 @@ Context capacity includes input, output and overhead; a million-token window doe
 Conductor targets **DSH >=0.2.1-rc.2 <0.2.2**, Node.js >=22.19. Build a tarball or use a release asset. In a CLI-managed profile:
 
 ```sh
-dsh plugin --profile web add ./dsh-conductor-0.2.0.tgz
+dsh plugin --profile web add ./dsh-conductor-0.3.0.tgz
 ```
 
 For an Electron-managed desktop profile, use its plugin manager instead of modifying the profile package files directly. Installing/replacing plugins can unload code: wait until existing runs are finished. Disable the previous orchestration extension before enabling Conductor so two planning guards do not compete. Conductor's manifest is additive and does not disable any standard or third-party rows itself.

@@ -179,14 +179,50 @@ describe('saved TODO execution', () => {
     }
     const selected = { ...policy, workerModel: { provider: 'bharatcode', model: 'deepseek-v4.1-flash' }, reviewerModel: { provider: 'codex', model: 'gpt-6.1-sol' } }
     const pending = runPlan(f.host, selected, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false })
-    await f.started(2)
+    await f.started(1)
     expect(f.state().todos[0].content).toContain('bharatcode/deepseek-v4.1-pro · high')
-    f.finish('one'); f.finish('two'); await f.started(3); f.finish('review')
+    f.finish('one'); await f.started(2); f.finish('two'); await f.started(3); f.finish('review')
     const done = await pending
     expect(done.taskStates?.find(t => t.taskId === 'one')).toMatchObject({ model: { provider: 'bharatcode', model: 'deepseek-v4.1-pro', reasoningEffort: 'high' }, modelSource: 'request' })
     const replay = await runPlan(f.host, { ...selected, workerModel: { provider: 'other', model: 'changed' } }, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false, runId: done.runId })
     expect(replay.taskStates?.find(t => t.taskId === 'one')).toMatchObject({ model: { provider: 'bharatcode', model: 'deepseek-v4.1-pro' }, modelSource: 'request' })
     expect(f.starts).toHaveLength(3)
+  })
+
+  it('skips same-run BharatCode waiters so Luna and Muse fill shared capacity through BharatCode disposal', async () => {
+    const controller = new AbortController(), f = fixture(undefined, controller.signal)
+    const graph = plan(['bharat-one', 'bharat-two', 'bharat-three', 'luna', 'muse'])
+    for (const task of graph.tasks) {
+      if (task.id.startsWith('bharat')) Object.assign(task, { model: { provider: 'bharatcode', model: 'worker' } })
+      if (task.id === 'luna') Object.assign(task, { model: { provider: 'codex', model: 'gpt-6-luna' } })
+      if (task.id === 'muse') Object.assign(task, { model: { provider: 'muse', model: 'spark' } })
+    }
+    const disposal = deferred<void>(), disposing = deferred<void>(), originalStart = f.host.start
+    f.host.start = async (request, task, onModel) => {
+      const child = await originalStart(request, task, onModel)
+      return { ...child, dispose: async () => {
+        if (task.id === 'bharat-one') { disposing.resolve(); await disposal.promise }
+        await child.dispose()
+      } }
+    }
+    const pending = runPlan(f.host, { ...policy, maxConcurrentAgents: 3, concurrencyByContext: [{ maxContextTokens: 1_000_000, maxActiveGenerations: 3 }] },
+      { objective: 'Mixed routes', plan: graph, planOnly: false, executeWrites: false })
+    try {
+      await f.started(3)
+      expect(f.starts.map(start => start.id)).toEqual(['bharat-one', 'luna', 'muse'])
+      for (const taskId of ['bharat-two', 'bharat-three']) expect(f.state().orchestration.result.taskStates.find(task => task.taskId === taskId)).toMatchObject({ state: 'QUEUED', attempts: 0 })
+      f.finish('bharat-one'); await disposing.promise
+      f.finish('luna'); f.finish('muse')
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+      expect(f.starts).toHaveLength(3)
+      disposal.resolve(); await f.started(4)
+      expect(f.starts.at(-1)?.id).toBe('bharat-two')
+      expect(f.disposed).toBe(3)
+      f.finish('bharat-two'); await f.started(5)
+      expect(f.starts.at(-1)?.id).toBe('bharat-three')
+      f.finish('bharat-three'); await f.started(6); f.finish('review')
+      expect((await pending).status).toBe('completed')
+    } finally { disposal.resolve(); controller.abort(); await pending }
   })
 
   it('saves assigned TODO before any child and runs four tasks as two active, two queued', async () => {

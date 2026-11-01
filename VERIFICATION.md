@@ -1,5 +1,17 @@
 # Verification — Conductor 0.1.2
 
+## 0.3.0 delegation controls and provider-aware concurrency — 1 November 2026
+
+- TypeScript check, production build, and 174 automated tests pass; three opt-in live cases are skipped by default. All 27 official Muse CLI adapter cases pass with live testing enabled.
+- A real Muse Spark 1.3 root in a trusted workspace attempted `subagent_spawn`. The actual tool result was `status: rejected`, `reason: root_capacity_exhausted`, with a runtime hint that no agent was created or queued. The trace had one configured root model and no included children. This tests runtime rejection, rather than a model's promise not to delegate.
+- Every Muse worker receives explicit per-run capacity1 (including its root), workflow off, local-session messaging off, reminders off, and disabled autonomous reminder capabilities. Native direct delegation is also guarded for short coordinator requests.
+- Provider-first global admission and same-run scheduling tests prove queued BharatCode work consumes no shared slot and cannot crowd out later models. Total capacity defaults to3; BharatCode is fixed at1 across DeepSeek, Qwen, workers, reviewers, owners and plans. Permits last through disposal and cancellation cleanup.
+- A real isolated DSH run used Sol as coordinator, DeepSeek Flash and Qwen through BharatCode, native Luna, and official Muse Spark1.3, followed by Sol review. Recorded checkpoints show DeepSeek, Luna and Muse ACTIVE simultaneously with observed request-route evidence while Qwen remained QUEUED with zero attempts. Peak active BharatCode was1. All four workers completed and final review approved after explicitly obtaining the requested model/transport evidence; completed workers were not rerun.
+- Model task-fit advice is returned by the catalog and included in coordinator guidance. `docs/model-routing.md` cites official documents and attributed community/practitioner observations and distinguishes recommendations from measured rankings.
+
+The supported native/Muse delegation paths are centrally controlled. General shell execution is not a universal security boundary against hostile code manually implementing another external client; CLI sandboxing remains enabled. Concurrent conflicting writes remain governed by existing scope/dependency settings.
+
+
 ## 0.2.0 model routing and official Muse CLI — 1 November 2026
 
 - `npm run check`, `npm test`, and `npm run build` pass: 165 automated tests, with two opt-in live cases skipped by default.

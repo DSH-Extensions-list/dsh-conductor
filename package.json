@@ -1,6 +1,6 @@
 {
   "name": "dsh-conductor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Background task orchestration with per-task model selection and official Muse CLI workers.",
   "author": {
     "name": "DSH Extensions"
@@ -50,7 +50,8 @@
     "SECURITY.md",
     "THIRD_PARTY_NOTICES.md",
     "docs/openai-model-limits.json",
-    "docs/openai-context-policy.md"
+    "docs/openai-context-policy.md",
+    "docs/model-routing.md"
   ],
   "publishConfig": {
     "access": "public"

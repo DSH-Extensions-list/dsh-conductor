@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-11-01
+
+- Enforce a one-root Muse execution tree and disable internal workflows, session messaging and observers per run.
+- Route every native delegation operation through Conductor, including short coordinator requests.
+- Admit up to three managed children by default, with one shared BharatCode permit across DeepSeek/Qwen and no slot consumption by queued BharatCode work.
+- Skip additional BharatCode tasks within a plan so other models can progress.
+- Expose researched task-fit advice in the model catalog and coordinator guidance.
+
 ## 0.2.0 — 2026-11-01
 
 - Discover native models and official Muse CLI models through `conductor_models`.

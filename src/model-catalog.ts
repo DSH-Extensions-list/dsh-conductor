@@ -2,6 +2,7 @@
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { TaskModel } from './types.js'
 import { MUSE_MODELS } from './muse-cli.js'
+import { assignmentAdvice } from './model-assignment.js'
 
 export const OFFICIAL_MUSE_MODELS = MUSE_MODELS
 export const MUSE_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
@@ -12,6 +13,7 @@ export interface CatalogModel {
   name: string
   transport: 'native' | 'muse-cli'
   reasoningEfforts: string[]
+  recommendedFor: string[]
   contextWindow?: number
   defaultOutputTokens?: number
   note?: string
@@ -30,7 +32,7 @@ export async function discoverModels(llm: LlmRuntime, muse: MuseAvailability, pr
         try {
           const info = await llm.resolveModelInfo(route.id, advertised.id)
           result.models.push({ provider: route.id, model: info.id, name: info.name, transport: 'native',
-            reasoningEfforts: info.reasoning?.efforts.map(effort => effort.id) ?? [],
+            reasoningEfforts: info.reasoning?.efforts.map(effort => effort.id) ?? [], recommendedFor: assignmentAdvice(route.id, info.id),
             ...(info.context?.contextWindow === undefined ? {} : { contextWindow: info.context.contextWindow }),
             ...(info.defaultMaxTokens === undefined ? {} : { defaultOutputTokens: info.defaultMaxTokens }),
             note: 'Registered provider catalog; inference access has not been probed.' })
@@ -43,7 +45,7 @@ export async function discoverModels(llm: LlmRuntime, muse: MuseAvailability, pr
   if (provider === undefined || provider === 'muse') {
     if (!muse.available) result.errors.push({ provider: 'muse', message: muse.reason ?? 'Official Muse CLI is unavailable or not signed in.' })
     else for (const id of OFFICIAL_MUSE_MODELS) if (model === undefined || model === id) result.models.push({ provider: 'muse', model: id, name: id,
-      transport: 'muse-cli', reasoningEfforts: [...MUSE_EFFORTS], note: `${muse.version ?? 'Official Muse CLI'}; account login present, model entitlement is checked by the CLI when starting.` })
+      transport: 'muse-cli', reasoningEfforts: [...MUSE_EFFORTS], recommendedFor: assignmentAdvice('muse', id), note: `${muse.version ?? 'Official Muse CLI'}; account login present, model entitlement is checked by the CLI when starting.` })
   }
   if (provider !== undefined && provider !== 'muse' && !llm.listProviders().some(p => p.id === provider)) result.errors.push({ provider, message: 'Provider is not registered.' })
   return result

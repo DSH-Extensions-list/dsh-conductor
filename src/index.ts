@@ -12,9 +12,10 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MAX_CONTEXT_TOKENS } from './adaptive.js'
 import { BackgroundRuns, type BackgroundSnapshot } from './background-runs.js'
-import { ChildLane } from './child-lane.js'
+import { WorkerAdmission } from './worker-admission.js'
 import { startMuseTask, probeMuseCli } from './muse-cli.js'
 import { discoverModels, resolveTaskRoute } from './model-catalog.js'
+import { MODEL_ASSIGNMENT_GUIDANCE } from './model-assignment.js'
 import { resolveWorkerBudget, contextPolicyForModel, bindRequestBudget } from './budget-policy.js'
 import { ResourceManager, validateContextConcurrency } from './resource-manager.js'
 import { readPlan, positiveInteger } from './validation.js'
@@ -45,7 +46,7 @@ export interface ContextConcurrency {
 }
 
 const DEFAULT_CONTEXT_CONCURRENCY: readonly ContextConcurrency[] = [
-  { maxContextTokens: MAX_CONTEXT_TOKENS, maxActiveGenerations: 1 },
+  { maxContextTokens: MAX_CONTEXT_TOKENS, maxActiveGenerations: 3 },
 ]
 
 /** Deployment policy for automatic task orchestration. */
@@ -155,13 +156,13 @@ export const Config: z<ConfigValues, Config> = z.object({
   preferredWorkers: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1),
   maxWorkers: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(6).volatile(),
   maxTotalAgents: z.number().step(1).min(1).max(6).default(6),
-  maxConcurrentAgents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
+  maxConcurrentAgents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(3).volatile(),
   allowWrites: z.boolean().default(false),
   allowParallelWrites: z.boolean().default(false),
   requireReview: z.boolean().default(true).volatile(),
   maxHandoffChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(262_144),
   maxResultChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(262_144),
-  maxActiveGenerations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
+  maxActiveGenerations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(3).volatile(),
   concurrencyByContext: z.array(z.object({
     maxContextTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     maxActiveGenerations: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
@@ -321,20 +322,18 @@ export function apply(ctx: Context, config: Config): void {
   })
   const turns = new WeakMap<Agent, TurnPolicy>()
   const runs = new BackgroundRuns()
-  const workerLane = new ChildLane(() => get('maxConcurrentAgents'))
-  const bharatcodeLane = new ChildLane()
+  const workerAdmission = new WorkerAdmission(() => get('maxConcurrentAgents'))
   const externalChildren = new Set<SessionId>()
   const unload = new AbortController()
   ctx.effect(() => async () => {
     unload.abort()
     resources.close()
-    workerLane.close()
-    bharatcodeLane.close()
+    workerAdmission.close()
     await runs.shutdown()
   })
   const planningReminder = (): string => {
     const { minParallelTasks, maxConcurrentAgents } = resolvePolicy()
-    return `Call conductor_models to discover registered models and supported reasoning efforts. Choose a model per task with model: {provider, model, reasoningEffort?}; omit it to use saved role defaults. Provider muse runs through the official account-authenticated Muse CLI, never the API subscription-key route. You coordinate substantive work through conductor_dispatch: save a concrete assigned plan with at least ${minParallelTasks} useful initial task(s), dependencies and a final reviewer${get('requireReview') ? ' (required)' : ''}. It returns an accepted run ID immediately in background mode; remain available to talk to the human. All managed workers share the configured child queue (one by default), including official Muse CLI workers; remaining tasks queue, and your lead-model requests are not put in that worker queue. Let the configured workers implement, investigate and test, then use the independent review evidence before reporting success. Use conductor_status for saved progress/results, conductor_message to steer an active task, and conductor_cancel to stop a run. Terminal notices arrive automatically; do not poll repeatedly or claim completion while pending. Short questions need no team. A plan's budgets default to the selected model's declared capacity (DeepSeek 1,000,000 combined context) and full configured per-response output; omit small budget overrides. Full-access workers retain their preset tools while honoring task-scope instructions. Use planOnly only when planning or approval is actually required. Existing authorization is sufficient; do not ask again. For an authorized implementation use executeWrites=true. Resume a blocked run using its exact saved objective and plan plus resumeContext, preserving completed evidence.`
+    return MODEL_ASSIGNMENT_GUIDANCE + "\n" + `Call conductor_models to discover registered models and supported reasoning efforts. Choose a model per task with model: {provider, model, reasoningEffort?}; omit it to use saved role defaults. Provider muse runs through the official account-authenticated Muse CLI, never the API subscription-key route. You coordinate substantive work through conductor_dispatch: save a concrete assigned plan with at least ${minParallelTasks} useful initial task(s), dependencies and a final reviewer${get('requireReview') ? ' (required)' : ''}. It returns an accepted run ID immediately in background mode; remain available to talk to the human. All managed workers share the configured child capacity (${maxConcurrentAgents} active, three by default), including official Muse CLI workers. BharatCode workers and reviewers share one provider slot; waiting BharatCode tasks do not occupy shared capacity. Remaining tasks queue, and your lead-model requests are not put in that worker queue. Let the configured workers implement, investigate and test, then use the independent review evidence before reporting success. Use conductor_status for saved progress/results, conductor_message to steer an active task, and conductor_cancel to stop a run. Terminal notices arrive automatically; do not poll repeatedly or claim completion while pending. Short questions need no team. A plan's budgets default to the selected model's declared capacity (DeepSeek 1,000,000 combined context) and full configured per-response output; omit small budget overrides. Full-access workers retain their preset tools while honoring task-scope instructions. Use planOnly only when planning or approval is actually required. Existing authorization is sufficient; do not ask again. For an authorized implementation use executeWrites=true. Resume a blocked run using its exact saved objective and plan plus resumeContext, preserving completed evidence.`
   }
   ctx.systemPrompt.section({ name: 'tool:conductor', order: 150, text: () => get('mode') === 'off' ? 'Automatic orchestration is disabled. The parent may use conductor_dispatch when the human explicitly requests a task team. Existing runs may finish.' : planningReminder() })
   ctx.tools.register(defineTool({
@@ -357,7 +356,7 @@ export function apply(ctx: Context, config: Config): void {
       plan: { ...TOOL_PLAN_SCHEMA, required: true },
       planOnly: { type: 'boolean', description: 'Save and display TODO without starting children.' },
       executeWrites: { type: 'boolean', description: 'True only when the human has already authorized implementation.' },
-      maxWorkers: { type: 'number', description: 'Optional smaller logical task ceiling, including review.' },
+      maxWorkers: { type: 'number', description: 'Optional smaller TOTAL task-graph ceiling, including final review. This is NOT concurrency; omit it unless reducing the number of logical tasks.' },
       runId: { type: 'string', description: 'Saved run to continue. Keep task assignments; unfinished task packets and budgets may be corrected. Completed task inputs remain unchanged.' },
       resumeContext: { type: 'json', description: 'Object mapping waiting task IDs to newly obtained data or corrected instructions. No automatic retries without this data.' },
     },
@@ -431,18 +430,15 @@ export function apply(ctx: Context, config: Config): void {
           const restriction: ToolRestriction | undefined = get('fullAccessWorkers') ? undefined : task.readOnly
             ? { allow: allowed } : deniedDelegation.length === 0 ? { allow: [...ctx.tools.schemas(parent).map(tool => tool.name)] } : { deny: deniedDelegation }
           // This permit covers child lifetime, not merely individual model streams.
-          const globalRelease = await workerLane.acquire(request.signal)
-          let providerRelease = () => {}
-          const release = () => { providerRelease(); globalRelease() }
+          const release = await workerAdmission.acquire(request.agentOptions?.provider, request.signal)
           try {
-            if (request.agentOptions?.provider === 'bharatcode') providerRelease = await bharatcodeLane.acquire(request.signal)
             if (request.agentOptions?.provider === 'muse') {
               const child = await startMuseTask({ ...request, cwd: request.cwd ?? parent.session.header.cwd }, task, {
                 executable: get('museExecutable') || undefined, timeoutMs: get('museTimeoutMs'), onModel,
               })
               externalChildren.add(child.id)
               let disposal: Promise<void> | undefined
-              return { ...child, dispose: () => disposal ??= child.dispose().then(() => { externalChildren.delete(child.id); release() }, error => { workerLane.close(); throw error }) }
+              return { ...child, dispose: () => disposal ??= child.dispose().then(() => { externalChildren.delete(child.id); release() }, error => { workerAdmission.close(); throw error }) }
             }
             return await budgetContext.run({ task, restriction, onModel, assignedModel: request.agentOptions?.provider && request.agentOptions.model ? { provider: request.agentOptions.provider, model: request.agentOptions.model } : undefined }, async () => {
               const activation = await ctx.subagents.startActivation({
@@ -543,10 +539,10 @@ export function apply(ctx: Context, config: Config): void {
     if (parent === undefined) return undefined
     if (parent.session.header.origin === 'subagent') {
       if (budgets.has(parent.id) && ['conductor_dispatch', 'subagent', 'subagent_fork', 'workflow'].includes(exec.name))
-        return 'Conductor owns the single-worker queue. Return requested additional work to the lead instead of spawning nested agents.'
+        return 'Conductor owns the provider-aware task queue. Return requested additional work to the lead instead of spawning nested agents.'
       return undefined
     }
-    if (runs.active(parent.id) !== undefined && ['subagent', 'subagent_fork', 'workflow'].includes(exec.name)) return 'Use the active Conductor run; direct delegation would bypass its single-worker queue.'
+    if (['subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].includes(exec.name)) return 'Conductor owns delegation. Use conductor_dispatch, conductor_message or conductor_cancel; direct delegation bypasses the provider-aware task queue.'
     const state = turns.get(parent)
     if (!state?.required) return undefined
     if (['subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].includes(exec.name)) return 'Use conductor_dispatch with the assigned TODO plan; direct delegation bypasses the task queue.'

@@ -65,6 +65,7 @@ describe('parent planning policy', () => {
     const next = async () => ({ kind: 'enter', messages })
     expect((await f.handlers.get('agent/pre-step')!({ agent, turn: 1, step: 1, messages }, next)).messages).toHaveLength(1)
     expect(f.handlers.get('guard')!({ agent, name: 'write' })).toBeUndefined()
+    for (const name of ['subagent','subagent_fork','workflow']) expect(f.handlers.get('guard')!({ agent, name })).toContain('Conductor')
     const reject = { kind: 'reject', reason: 'stopped' }
     expect(await f.handlers.get('agent/pre-step')!({ agent, turn: 2, step: 1, messages }, async () => reject)).toBe(reject)
     await Promise.all(f.effects.map(dispose => dispose()))

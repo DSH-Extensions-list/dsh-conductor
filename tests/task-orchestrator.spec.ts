@@ -41,8 +41,16 @@ describe('DSH Conductor', () => {
 
   it('keeps default context concurrency within the default global ceiling', () => {
     const defaults = Config({})
-    expect(defaults.maxActiveGenerations.get()).toBe(1)
+    expect(defaults.maxConcurrentAgents.get()).toBe(3)
+    expect(defaults.maxActiveGenerations.get()).toBe(3)
     expect(defaults.concurrencyByContext.get().every(tier => tier.maxActiveGenerations <= defaults.maxActiveGenerations.get())).toBe(true)
+  })
+
+  it('preserves explicit shared and stream concurrency limits', () => {
+    const configured = Config({ maxConcurrentAgents: 1, maxActiveGenerations: 1, concurrencyByContext: [{ maxContextTokens: 1_000_000, maxActiveGenerations: 1 }] })
+    expect(configured.maxConcurrentAgents.get()).toBe(1)
+    expect(configured.maxActiveGenerations.get()).toBe(1)
+    expect(configured.concurrencyByContext.get()).toEqual([{ maxContextTokens: 1_000_000, maxActiveGenerations: 1 }])
   })
 
   it('exposes queue and context settings without granting live edits to write permissions', () => {
