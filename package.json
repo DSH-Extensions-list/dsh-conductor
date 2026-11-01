@@ -1,7 +1,7 @@
 {
   "name": "dsh-conductor",
-  "version": "0.1.2",
-  "description": "Background Sol orchestration with full-context DeepSeek workers and independent review.",
+  "version": "0.2.0",
+  "description": "Background task orchestration with per-task model selection and official Muse CLI workers.",
   "author": {
     "name": "DSH Extensions"
   },

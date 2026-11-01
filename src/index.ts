@@ -13,10 +13,12 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { MAX_CONTEXT_TOKENS } from './adaptive.js'
 import { BackgroundRuns, type BackgroundSnapshot } from './background-runs.js'
 import { ChildLane } from './child-lane.js'
+import { startMuseTask, probeMuseCli } from './muse-cli.js'
+import { discoverModels, resolveTaskRoute } from './model-catalog.js'
 import { resolveWorkerBudget, contextPolicyForModel, bindRequestBudget } from './budget-policy.js'
 import { ResourceManager, validateContextConcurrency } from './resource-manager.js'
 import { readPlan, positiveInteger } from './validation.js'
-import { runPlan, OrchestrationRunId, type RunnerPolicy, type Checkpoint } from './runner.js'
+import { runPlan, taskModelFor, OrchestrationRunId, type RunnerPolicy, type Checkpoint } from './runner.js'
 import { TOOL_PLAN_SCHEMA } from './schemas.js'
 import { formatTaskModel } from './model-label.js'
 import type { PlannedTask, TaskModel } from './types.js'
@@ -50,6 +52,10 @@ const DEFAULT_CONTEXT_CONCURRENCY: readonly ContextConcurrency[] = [
 export interface ConfigValues extends RoleModelValues {
   /** Return immediately while an owned task run continues. */
   backgroundMode?: boolean
+  /** Official Muse CLI executable; empty uses PATH/local installation discovery. */
+  museExecutable?: string
+  /** Timeout for a single official Muse worker. */
+  museTimeoutMs?: number
   /** Give workers all capabilities available in their selected preset. */
   fullAccessWorkers?: boolean
   /** Default combined worker context ceiling; exact route capacity remains authoritative. */
@@ -128,6 +134,8 @@ export type Config = Omit<ConfigValues, LiveSetting> & {
 /** Schemastery configuration for the task orchestrator plugin. */
 export const Config: z<ConfigValues, Config> = z.object({
   respectTaskBudgets: z.boolean().default(false),
+  museExecutable: z.string().default(''),
+  museTimeoutMs: z.number().step(1).min(1000).max(7_200_000).default(1_800_000),
   backgroundMode: z.boolean().default(true).volatile(),
   fullAccessWorkers: z.boolean().default(true).volatile(),
   workerContextTokens: z.number().step(1).min(1).max(1_000_000).default(1_000_000).volatile(),
@@ -313,19 +321,34 @@ export function apply(ctx: Context, config: Config): void {
   })
   const turns = new WeakMap<Agent, TurnPolicy>()
   const runs = new BackgroundRuns()
+  const workerLane = new ChildLane(() => get('maxConcurrentAgents'))
   const bharatcodeLane = new ChildLane()
+  const externalChildren = new Set<SessionId>()
   const unload = new AbortController()
   ctx.effect(() => async () => {
     unload.abort()
     resources.close()
+    workerLane.close()
     bharatcodeLane.close()
     await runs.shutdown()
   })
   const planningReminder = (): string => {
     const { minParallelTasks, maxConcurrentAgents } = resolvePolicy()
-    return `You coordinate substantive work through conductor_dispatch: save a concrete assigned plan with at least ${minParallelTasks} useful initial task(s), dependencies and a final reviewer${get('requireReview') ? ' (required)' : ''}. It returns an accepted run ID immediately in background mode; remain available to talk to the human. Only one BharatCode child is spawned at a time, remaining tasks queue, and your lead-model requests are not put in that worker queue. Let the configured workers implement, investigate and test, then use the independent review evidence before reporting success. Use conductor_status for saved progress/results, conductor_message to steer an active task, and conductor_cancel to stop a run. Terminal notices arrive automatically; do not poll repeatedly or claim completion while pending. Short questions need no team. A plan's budgets default to the selected model's declared capacity (DeepSeek 1,000,000 combined context) and full configured per-response output; omit small budget overrides. Full-access workers retain their preset tools while honoring task-scope instructions. Use planOnly only when planning or approval is actually required. Existing authorization is sufficient; do not ask again. For an authorized implementation use executeWrites=true. Resume a blocked run using its exact saved objective and plan plus resumeContext, preserving completed evidence.`
+    return `Call conductor_models to discover registered models and supported reasoning efforts. Choose a model per task with model: {provider, model, reasoningEffort?}; omit it to use saved role defaults. Provider muse runs through the official account-authenticated Muse CLI, never the API subscription-key route. You coordinate substantive work through conductor_dispatch: save a concrete assigned plan with at least ${minParallelTasks} useful initial task(s), dependencies and a final reviewer${get('requireReview') ? ' (required)' : ''}. It returns an accepted run ID immediately in background mode; remain available to talk to the human. All managed workers share the configured child queue (one by default), including official Muse CLI workers; remaining tasks queue, and your lead-model requests are not put in that worker queue. Let the configured workers implement, investigate and test, then use the independent review evidence before reporting success. Use conductor_status for saved progress/results, conductor_message to steer an active task, and conductor_cancel to stop a run. Terminal notices arrive automatically; do not poll repeatedly or claim completion while pending. Short questions need no team. A plan's budgets default to the selected model's declared capacity (DeepSeek 1,000,000 combined context) and full configured per-response output; omit small budget overrides. Full-access workers retain their preset tools while honoring task-scope instructions. Use planOnly only when planning or approval is actually required. Existing authorization is sufficient; do not ask again. For an authorized implementation use executeWrites=true. Resume a blocked run using its exact saved objective and plan plus resumeContext, preserving completed evidence.`
   }
   ctx.systemPrompt.section({ name: 'tool:conductor', order: 150, text: () => get('mode') === 'off' ? 'Automatic orchestration is disabled. The parent may use conductor_dispatch when the human explicitly requests a task team. Existing runs may finish.' : planningReminder() })
+  ctx.tools.register(defineTool({
+    name: 'conductor_models',
+    description: 'Discover available native DSH models and official Muse CLI models. Returns exact provider/model ids, supported reasoning efforts, transport, and availability diagnostics. Use model: {provider, model, reasoningEffort?} on individual conductor_dispatch tasks. Catalog presence is not proof of account entitlement.',
+    parameters: { provider: { type: 'string', description: 'Optional exact provider id.' }, model: { type: 'string', description: 'Optional exact model id; requires provider.' } },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'json', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value.result) }] },
+    async execute(args) {
+      if (args.model !== undefined && args.provider === undefined) throw new TypeError('model requires provider')
+      const muse = args.provider === undefined || args.provider === 'muse' ? await probeMuseCli(get('museExecutable') || undefined) : { available: false }
+      return { result: JSON.parse(JSON.stringify(await discoverModels(ctx.llm, muse, args.provider, args.model))) as JsonValue }
+    }, presentCall: () => ({ card: 'generic', title: 'Available task models' }), presentResult: () => ({ card: 'generic' }),
+  }))
   ctx.tools.register(defineTool({
     name: 'conductor_dispatch',
     description: 'Save an assigned task graph and dispatch background workers. Returns an accepted run ID without waiting, so the lead can keep talking. Completion or actionable failure is delivered later. Explicit plan required; resume preserves exact saved assignments.',
@@ -353,10 +376,20 @@ export function apply(ctx: Context, config: Config): void {
       const plan = readPlan(args.plan, get('maxHandoffChars'), true)
       const policy = resolvePolicy(parent)
       const rawTasks = (args.plan as { tasks: Array<Record<string, unknown>> }).tasks
+      const needsMuse = plan.tasks.some(task => taskModelFor(task, policy)?.provider === 'muse')
+      const muse = needsMuse ? await probeMuseCli(get('museExecutable') || undefined) : { available: false }
       for (const task of plan.tasks) {
-        const model = task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel
+        const model = taskModelFor(task, policy)
         if (model === undefined) throw new Error('Choose a worker model before dispatch')
-        const info = await ctx.llm.resolveModelInfo(model.provider, model.model, exec.signal)
+        if (model.provider === 'muse') {
+          await resolveTaskRoute(ctx.llm, model, muse, exec.signal)
+          // Fixed valid checkpoint bookkeeping only, not a claim about model capacity.
+          // The CLI owns actual context/output policy and ignores native token overrides.
+          Object.assign(task, { contextBudget: 1_000_000, outputReserveTokens: 32_000, safetyReserveTokens: 1_024 })
+          continue
+        }
+        const info = task.model === undefined ? await ctx.llm.resolveModelInfo(model.provider, model.model, exec.signal)
+          : (await resolveTaskRoute(ctx.llm, model, muse, exec.signal) as { transport: 'native'; info: Awaited<ReturnType<typeof ctx.llm.resolveModelInfo>> }).info
         const raw = rawTasks.find(item => item.id === task.id)!
         const automaticContext = contextPolicyForModel(model.provider, model.model)
         const taskOverrides = automaticContext === undefined && get('respectTaskBudgets')
@@ -392,14 +425,25 @@ export function apply(ctx: Context, config: Config): void {
           if (state !== undefined) state.saved = true
           lifecycle.onCheckpoint(checkpoint)
         },
-        childIsLive: id => ctx.agents.get(id) !== undefined,
+        childIsLive: id => externalChildren.has(id) || ctx.agents.get(id) !== undefined,
         failureDetail: id => { const detail = budgetFailures.get(id); budgetFailures.delete(id); return detail },
         start: async (request, task, onModel) => {
           const restriction: ToolRestriction | undefined = get('fullAccessWorkers') ? undefined : task.readOnly
             ? { allow: allowed } : deniedDelegation.length === 0 ? { allow: [...ctx.tools.schemas(parent).map(tool => tool.name)] } : { deny: deniedDelegation }
           // This permit covers child lifetime, not merely individual model streams.
-          const release = request.agentOptions?.provider === 'bharatcode' ? await bharatcodeLane.acquire(request.signal) : () => {}
+          const globalRelease = await workerLane.acquire(request.signal)
+          let providerRelease = () => {}
+          const release = () => { providerRelease(); globalRelease() }
           try {
+            if (request.agentOptions?.provider === 'bharatcode') providerRelease = await bharatcodeLane.acquire(request.signal)
+            if (request.agentOptions?.provider === 'muse') {
+              const child = await startMuseTask({ ...request, cwd: request.cwd ?? parent.session.header.cwd }, task, {
+                executable: get('museExecutable') || undefined, timeoutMs: get('museTimeoutMs'), onModel,
+              })
+              externalChildren.add(child.id)
+              let disposal: Promise<void> | undefined
+              return { ...child, dispose: () => disposal ??= child.dispose().then(() => { externalChildren.delete(child.id); release() }, error => { workerLane.close(); throw error }) }
+            }
             return await budgetContext.run({ task, restriction, onModel, assignedModel: request.agentOptions?.provider && request.agentOptions.model ? { provider: request.agentOptions.provider, model: request.agentOptions.model } : undefined }, async () => {
               const activation = await ctx.subagents.startActivation({
                 provider: get('subagentProvider'), label: request.agentOptions?.provider && request.agentOptions.model
@@ -488,6 +532,7 @@ export function apply(ctx: Context, config: Config): void {
       if (action === 'message') {
         const task = snapshot.checkpoint?.result.taskStates.find(task => task.taskId === args.taskId)
         if (task?.state !== 'ACTIVE' || task.childId === undefined || !args.message?.trim()) throw new Error('Choose a live assigned task and supply a non-empty message')
+        if (externalChildren.has(task.childId) || task.model?.provider === 'muse') throw new Error('Official Muse CLI tasks cannot accept live messages. Cancel this run, wait for disposal, and resume its saved task with resumeContext.')
         await ctx.subagents.sendMessage(parent, task.childId, [{ type: 'text', text: args.message }], { signal: exec.signal })
       }
       return { result: JSON.parse(JSON.stringify(snapshot)) as JsonValue }
@@ -505,7 +550,7 @@ export function apply(ctx: Context, config: Config): void {
     const state = turns.get(parent)
     if (!state?.required) return undefined
     if (['subagent', 'subagent_fork', 'workflow', 'send_message', 'interrupt_agent'].includes(exec.name)) return 'Use conductor_dispatch with the assigned TODO plan; direct delegation bypasses the task queue.'
-    if (!state.saved && !['conductor_status', 'conductor_message', 'conductor_cancel'].includes(exec.name) && exec.name !== 'conductor_dispatch' && exec.name !== 'run_code' && !get('readOnlyTools').includes(exec.name) && !['ask_user', 'request_user_input', 'todo_write', 'plan'].includes(exec.name)) return 'Save an assigned plan through conductor_dispatch before implementation.'
+    if (!state.saved && !['conductor_models', 'conductor_status', 'conductor_message', 'conductor_cancel'].includes(exec.name) && exec.name !== 'conductor_dispatch' && exec.name !== 'run_code' && !get('readOnlyTools').includes(exec.name) && !['ask_user', 'request_user_input', 'todo_write', 'plan'].includes(exec.name)) return 'Save an assigned plan through conductor_dispatch before implementation.'
     return undefined
   })
   ctx.on('agent/pre-step', async ({ agent, messages, turn, step }, next): Promise<PreStepDecision> => {

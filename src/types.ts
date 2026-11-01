@@ -34,6 +34,8 @@ export interface PlannedTask {
   dependsOn: string[]
   readOnly: boolean
   writeScopes: string[]
+  /** Explicit per-task route, selected from conductor_models; overrides role defaults. */
+  model?: TaskModel
   /** Whole-token context tier selected by the parent orchestrator. */
   contextBudget?: number
   /** Reserved output tokens used during admission. */

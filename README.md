@@ -1,17 +1,41 @@
 # DSH Conductor
 
-Keep talking to your coordinator while workers do the work. Conductor dispatches a saved task graph in the background, queues BharatCode children one at a time, and delivers reviewed results to the owning conversation.
+Keep talking to your coordinator while workers do the work. Conductor dispatches a saved task graph in the background, queues native and official Muse CLI children, and delivers reviewed results to the owning conversation.
 
 An MIT fork of [DSH Task Orchestrator](https://github.com/hasan-aghayev/dsh-task-orchestrator), with a new background lifecycle, child lane, full-context budgets, controls and settings. See [attribution](THIRD_PARTY_NOTICES.md) and the [source comparison](docs/research/alternatives.md).
+
+## Choosing models per task
+
+I use `conductor_models` to give the coordinator a live catalog of the registered DSH models and the standard models supported by the official Muse CLI. It includes exact provider/model ids, reasoning choices, transport, and provider-local discovery errors. Discovery checks configuration and CLI login presence; an actual model request still has to establish account access.
+
+Each task can set its own model:
+
+```json
+{"id":"inspect","owner":"inspector","title":"Inspect source","role":"researcher","prompt":"Inspect the source and return evidence.","dependsOn":[],"readOnly":true,"writeScopes":[],"model":{"provider":"codex","model":"gpt-6-luna","reasoningEffort":"low"}}
+```
+
+Use `provider: "muse"` with a model returned by `conductor_models` for an official Muse CLI worker. Native DSH models keep the in-process spawn path. Every explicit route and reasoning choice is checked before any task starts; an unavailable route fails visibly. Omitting `model` retains the saved worker/reviewer defaults. Explicit selections are part of the saved assignment and cannot silently change on resume.
+
+### Official Muse CLI
+
+Muse subscription tasks run through `muse exec` with account login. They never use the OpenAI-compatible subscription-key route. Install and sign in to the official CLI first. The plugin finds `muse` in the current user's local bin/PATH, or uses deployment setting `museExecutable` / environment variable `DSH_MUSE_EXECUTABLE`. The deployment's `museTimeoutMs` defaults to 30 minutes.
+
+The CLI owns its context, compaction, and output policy; native DSH token-budget fields are not applied to it. A task result must be a schema-valid final report from the matching root CLI run with a successful exit. Read-only tasks disable filesystem writes and shell; authorized editing tasks keep the CLI sandbox and disable interactive approval prompts. The current process-tree supervision requires Linux.
+
+The configured child queue is shared across native and external workers, including reviewers. Its default capacity is one. The existing single-child BharatCode admission is also preserved. Conductor frees an external slot only after the CLI's owned process group is stopped and cleanup finishes. If process cleanup cannot be established, the lane closes and reports failure rather than admitting another process.
+
+`conductor_status` retains the selected/observed model, task evidence, and failures. `conductor_cancel` requests termination of an owned CLI run; its slot stays occupied until process cleanup finishes. The CLI transport does not support live steering through `conductor_message`: cancel, wait for disposal, and resume the saved task with `resumeContext`. Conductor never invents delivery or falls back to another model.
+
+The queue covers Conductor-managed children. Muse's own built-in subagent tools are not controlled by DSH's tool guards; the handoff forbids nested delegation, but enforcement inside the official client remains owned by Muse. External shell processes and other plugins likewise remain outside Conductor's scheduling authority.
 
 ## Defaults
 
 The package preset selects **Codex / GPT-6.1 Sol / Medium** for the coordinator and final reviewer, and **BharatCode / DeepSeek v4.1 Flash** for workers. These routes must already exist in your DSH profile. All three roles have model and reasoning selectors in **Settings → Conductor**. Choose other available routes there; unsupported selections fail visibly rather than silently substituting a model.
 
 - Background dispatch returns an accepted run ID immediately. The coordinator can answer another prompt while the run remains pending.
-- Exactly one Conductor-managed BharatCode child is admitted at a time across conversations in this plugin instance. The permit lasts through child disposal, not just one API response. Extra tasks queue. The lead and Codex reviewer stay outside the worker queue.
+- By default, one Conductor-managed child is admitted at a time across conversations and model transports; BharatCode additionally retains its single-child admission. The permit lasts through child disposal, not just one API response. Extra tasks queue. The lead remains outside the child queue; final reviewers retain their dependency gates and share child admission.
 - DeepSeek workers use their **1,000,000-token provider window** with no additional Conductor task/shared-context rejection, plus the selected adapter's complete configured per-response output allowance. The current BharatCode declaration is **32,000 output tokens**, not an independently measured backend maximum. Conductor ignores obsolete model-authored context caps such as 98K/114K for DeepSeek and GPT. GPT uses exact documented OpenAI model ceilings and any smaller route-reported capacity, rather than a blanket 1M clamp. See [verified GPT limits](docs/openai-context-policy.md).
-- Full-access workers, including reviewers, receive all tools available in their preset plus `danger-full-access` / `approval: never`. Review-only assignments are instructions, not filesystem confinement. Nested delegation tools are guarded so they cannot bypass the single-child queue. Other plugins and external processes are outside that queue.
+- Native full-access workers, including reviewers, receive all tools available in their preset plus `danger-full-access` / `approval: never`. Review-only assignments are instructions, not filesystem confinement. Nested delegation tools are guarded so they cannot bypass the single-child queue. Other plugins and external processes are outside that queue.
 - Native Fleet/subagent names include the selected provider, model and reasoning level. Queued task rows mark that selection as assigned; once a model request starts, TODO/status records its actual route. Completed tasks retain their recorded model even after selector changes, and old checkpoints without model evidence stay unknown.
 - Final review is required by default. Success requires every task's structured evidence and an approved review. Failures, cancellation and missing context are reported with partial evidence.
 
@@ -22,12 +46,12 @@ Context capacity includes input, output and overhead; a million-token window doe
 Conductor targets **DSH >=0.2.1-rc.2 <0.2.2**, Node.js >=22.19. Build a tarball or use a release asset. In a CLI-managed profile:
 
 ```sh
-dsh plugin --profile web add ./dsh-conductor-0.1.2.tgz
+dsh plugin --profile web add ./dsh-conductor-0.2.0.tgz
 ```
 
 For an Electron-managed desktop profile, use its plugin manager instead of modifying the profile package files directly. Installing/replacing plugins can unload code: wait until existing runs are finished. Disable the previous orchestration extension before enabling Conductor so two planning guards do not compete. Conductor's manifest is additive and does not disable any standard or third-party rows itself.
 
-The initial delivery was built and tested in isolation. It was **not installed into or reloaded over the user's active DSH process**.
+Package replacement can unload active workers. Install through the desktop plugin manager when the profile is idle; retain existing settings.
 
 ## Use
 
@@ -35,12 +59,13 @@ Ask for ordinary implementation, investigation or review work. Substantial human
 
 | Tool | Behavior |
 | --- | --- |
+| `conductor_models` | Discover exact available task routes, reasoning choices, and transport diagnostics. |
 | `conductor_dispatch` | Save the assigned plan, start/queue children and return a background run ID. `runId` plus corrected context resumes a saved run. |
 | `conductor_status` | Show this conversation's current/latest or specified run, task states, child IDs and evidence. |
 | `conductor_message` | Deliver new instructions or information to an active assigned task. |
 | `conductor_cancel` | Cancel an owned run, dispose active children and release queued admissions. |
 
-You can continue the conversation, ask for status, or redirect an active worker. One run per coordinator is active at a time. A separate project/conversation can have a separate run while sharing the global BharatCode lane. Follow-up work can steer the current run or be dispatched after it settles.
+You can continue the conversation, ask for status, or redirect an active worker. One run per coordinator is active at a time. A separate project/conversation can have a separate run while sharing the configured child queue and the BharatCode-specific lane. Follow-up work can steer the current run or be dispatched after it settles.
 
 Settings changes are staged and saved atomically with revision checks. Running runs keep their captured model/policy choices; a new run uses saved changes. Controls include background mode, full access, other-model context fallback, worker output, task slots, review, starts/retries and context estimates. DeepSeek/GPT automatic context policies supersede the fallback and synthetic shared caps. Model-window overflow uses DSH’s canonical recovery code so existing compaction can handle it; DeepSeek’s true provider overflow remains provider/native-harness owned. Output `0` means the selected adapter's declared output allowance. Optional `respectTaskBudgets: true` allows explicit per-task reductions for advanced deployments.
 
@@ -48,7 +73,7 @@ Settings changes are staged and saved atomically with revision checks. Running r
 
 Keep the existing `max-tokens-continue` extension enabled. It continues the **same in-process worker** with its retained conversation when output is truncated. Conductor accepts a sticky `max-tokens` outcome only when a final structured result actually committed and validates; truncated tool arguments, missing capture, aborts and errors remain unsuccessful. The continuation extension retains its own retry/progress settings (the inspected version defaults to nine continuations); Conductor does not pretend those are unlimited.
 
-Retained conversation is subject to the host's existing compaction, image-offload and tool-output policies. The continuation hook cannot reconstruct content that the host has already removed. External CLI/SDK workers would need their own continuation setup; Conductor's tested transport is in-process `spawn`.
+Retained conversation is subject to the host's existing compaction, image-offload and tool-output policies. The continuation hook cannot reconstruct content that the host has already removed. External CLI/SDK workers would need their own continuation setup; Conductor supports in-process `spawn` and the official Muse CLI; the CLI owns its continuation behavior.
 
 ## Persistence and boundaries
 

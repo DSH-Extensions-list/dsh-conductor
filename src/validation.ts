@@ -1,5 +1,5 @@
 /** Parse model-authored plans and child reports before scheduling. @module */
-import { TASK_ROLES, type PlannedTask, type TaskPlan, type WorkerReport, type ReviewReport, type WorkerNeed } from './types.js'
+import { TASK_ROLES, type PlannedTask, type TaskPlan, type WorkerReport, type ReviewReport, type WorkerNeed, type TaskModel } from './types.js'
 
 /** Require an object from model or durable JSON. */
 export function record(value: unknown): Record<string, unknown> {
@@ -21,6 +21,19 @@ function choice<T extends string>(value: unknown, choices: readonly T[], field: 
   const found = choices.find(item => item === value)
   if (found === undefined) throw new TypeError(`Invalid ${field}`)
   return found
+}
+
+/** Preserve exact route identifiers and reject fields that would otherwise be lost. */
+export function readTaskModel(value: unknown): TaskModel {
+  let raw: Record<string, unknown>
+  try { raw = record(value) } catch { throw new TypeError('task.model must be an object') }
+  if (Object.keys(raw).some(key => !['provider', 'model', 'reasoningEffort'].includes(key))) throw new TypeError('task.model contains unsupported fields')
+  const exact = (value: unknown, field: string): string => {
+    if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) throw new TypeError(`task.model.${field} must be non-empty trimmed text`)
+    return value
+  }
+  return { provider: exact(raw.provider, 'provider'), model: exact(raw.model, 'model'),
+    ...(raw.reasoningEffort === undefined ? {} : { reasoningEffort: exact(raw.reasoningEffort, 'reasoningEffort') }) }
 }
 
 /** Validate a whole-token limit received from the model. */
@@ -49,6 +62,7 @@ export function readPlan(value: unknown, maxChars: number, deferBudgetFit = fals
       outputReserveTokens: positiveInteger(item.outputReserveTokens ?? 32_000, 'outputReserveTokens'),
       safetyReserveTokens: positiveInteger(item.safetyReserveTokens ?? 1_024, 'safetyReserveTokens'),
     }
+    if (item.model !== undefined) task.model = readTaskModel(item.model)
     if (!deferBudgetFit && task.outputReserveTokens! + task.safetyReserveTokens! >= task.contextBudget!) throw new TypeError(`${task.id}: reserves leave no input context`)
     if (task.readOnly && task.writeScopes.length !== 0) throw new TypeError(`${task.id}: read-only task cannot declare writes`)
     if (!task.readOnly && (task.writeScopes.length === 0 || task.writeScopes.some(scope => scope.trim().length === 0))) throw new TypeError(`${task.id}: write task must declare writeScopes`)

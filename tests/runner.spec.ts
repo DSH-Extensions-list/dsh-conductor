@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import { runPlan, type RunnerHost, type RunnerPolicy } from '../src/runner.ts'
+import { TOOL_PLAN_SCHEMA } from '../src/schemas.ts'
 import { readPlan, compactReport } from '../src/validation.ts'
 import type { TaskPlan, WorkerReport } from '../src/types.ts'
 
@@ -64,6 +65,79 @@ function fixture(seed?: ReturnType<Session['snapshotEvents']>, signal = new Abor
 }
 
 describe('saved TODO execution', () => {
+  it('advertises exact explicit task routes and catalog discovery in the model-facing schema', () => {
+    const model = TOOL_PLAN_SCHEMA.properties.tasks.items.properties.model
+    expect(model).toMatchObject({ type: 'object', additionalProperties: false, properties: {
+      provider: { type: 'string', required: true }, model: { type: 'string', required: true }, reasoningEffort: { type: 'string' },
+    } })
+    expect(model.description).toContain('conductor_models')
+  })
+
+  it('accepts the same route fields in a different JSON key order on resume', async () => {
+    const f = fixture(), graph = plan(['one', 'two'])
+    Object.assign(graph.tasks[0], { model: { provider: 'muse', model: 'spark' } })
+    const saved = await runPlan(f.host, policy, { objective: 'Routes', plan: graph, planOnly: true, executeWrites: false })
+    const reordered = structuredClone(graph)
+    Object.assign(reordered.tasks[0], { model: { model: 'spark', provider: 'muse' } })
+    const resumed = await runPlan(f.host, policy, { objective: 'Routes', plan: reordered, planOnly: true, executeWrites: false, runId: saved.runId })
+    expect(resumed.taskStates?.[0]).toMatchObject({ model: { provider: 'muse', model: 'spark' }, modelSource: 'assigned' })
+  })
+
+  it('dispatches explicit task routes ahead of defaults and preserves observed evidence on replay', async () => {
+    const f = fixture(), raw = plan(['one', 'two'])
+    Object.assign(raw.tasks[0], { model: { provider: 'codex', model: 'gpt-6-luna', reasoningEffort: 'low' } })
+    Object.assign(raw.tasks[1], { model: { provider: 'muse', model: 'spark' } })
+    Object.assign(raw.tasks[2], { model: { provider: 'codex', model: 'gpt-6.1-sol', reasoningEffort: 'high' } })
+    const graph = readPlan(raw, policy.maxHandoffChars)
+    expect(graph.tasks[1]).toHaveProperty('model', { provider: 'muse', model: 'spark' })
+    const originalStart = f.host.start
+    f.host.start = async (request, task, observed) => {
+      const run = await originalStart(request, task)
+      observed?.({ provider: request.agentOptions!.provider!, model: request.agentOptions!.model!, ...(task.id === 'two' ? {} : { reasoningEffort: task.id === 'one' ? 'low' : 'high' }) })
+      return run
+    }
+    const pending = runPlan(f.host, { ...policy, workerModel: { provider: 'default', model: 'worker' }, reviewerModel: { provider: 'default', model: 'reviewer' } }, { objective: 'Routes', plan: graph, planOnly: false, executeWrites: false })
+    await f.started(2)
+    expect(f.starts[0].request.agentOptions).toMatchObject({ provider: 'codex', model: 'gpt-6-luna', reasoningEffort: 'low' })
+    expect(f.starts[1].request.agentOptions).toMatchObject({ provider: 'muse', model: 'spark', reasoningEffort: undefined })
+    f.finish('one'); f.finish('two'); await f.started(3)
+    expect(f.starts[2].request.agentOptions).toMatchObject({ provider: 'codex', model: 'gpt-6.1-sol', reasoningEffort: 'high' })
+    f.finish('review')
+    const done = await pending
+    expect(done.taskStates?.find(state => state.taskId === 'two')).toMatchObject({ model: { provider: 'muse', model: 'spark' }, modelSource: 'request' })
+    const replay = await runPlan(f.host, policy, { objective: 'Routes', plan: graph, planOnly: false, executeWrites: false, runId: done.runId })
+    expect(replay.taskStates).toEqual(done.taskStates)
+    expect(f.starts).toHaveLength(3)
+  })
+
+  it.each([
+    { provider: 'codex', model: 'different' },
+    { provider: 'muse', model: 'gpt-6-luna' },
+    { provider: 'codex', model: 'gpt-6-luna', reasoningEffort: 'high' },
+    undefined,
+  ])('rejects an edited explicit route before resume starts: %j', async model => {
+    const f = fixture(), graph = plan(['one', 'two'])
+    Object.assign(graph.tasks[0], { model: { provider: 'codex', model: 'gpt-6-luna', reasoningEffort: 'low' } })
+    const saved = await runPlan(f.host, policy, { objective: 'Routes', plan: graph, planOnly: true, executeWrites: false })
+    const changed = structuredClone(graph)
+    Object.assign(changed.tasks[0], { model })
+    await expect(runPlan(f.host, policy, { objective: 'Routes', plan: changed, planOnly: false, executeWrites: false, runId: saved.runId })).rejects.toThrow(/assignment/)
+    expect(f.starts).toHaveLength(0)
+  })
+
+  it.each([null, {}, { provider: 'codex' }, { model: 'spark' }, { provider: '', model: 'spark' },
+    { provider: ' codex', model: 'spark' }, { provider: 'codex', model: 'spark ' },
+    { provider: 'muse', model: 'spark', reasoningEffort: '' }, { provider: 'muse', model: 'spark', reasoningEffort: ' low' },
+    { provider: 'muse', model: 'spark', typo: true },
+  ])('rejects malformed task model without dispatch: %j', async model => {
+    const f = fixture(), raw = plan(['one', 'two'])
+    Object.assign(raw.tasks[0], { model })
+    f.host.start = async () => { throw new Error('malformed route reached dispatch') }
+    expect(() => readPlan(raw, policy.maxHandoffChars)).toThrow(/model/)
+    await expect(runPlan(f.host, policy, { objective: 'Routes', plan: raw, planOnly: false, executeWrites: false })).rejects.toThrow(/model/)
+    expect(f.starts).toHaveLength(0)
+  })
+
   it('refreshes never-started model assignments when a saved plan is resumed with a different route', async () => {
     const f = fixture(), graph = plan(['one','two'])
     const saved = await runPlan(f.host, { ...policy, workerModel: { provider: 'provider-a', model: 'model-a' } }, { objective: 'Plan', plan: graph, planOnly: true, executeWrites: false })
@@ -229,6 +303,38 @@ describe('saved TODO execution', () => {
     const result = await pending
     expect(result.status).toBe('failed'); expect(f.disposed).toBe(2); expect(f.starts).toHaveLength(2)
     expect(result.taskStates?.every(state => state.state === 'CANCELLED')).toBe(true)
+  })
+
+  it('resumes a cancelled worker with context and runs its never-started reviewer without repeating completed evidence', async () => {
+    const controller = new AbortController(), f = fixture(undefined, controller.signal), graph = plan(['one', 'two'])
+    graph.tasks[0].model = { provider: 'muse', model: 'muse-spark-1.3', reasoningEffort: 'low' }
+    graph.tasks[1].model = { provider: 'codex', model: 'gpt-6-luna' }
+    const completedSibling = deferred<void>()
+    f.host.onCheckpoint = checkpoint => {
+      if (checkpoint.result.taskStates.find(state => state.taskId === 'two')?.state === 'DONE') completedSibling.resolve()
+    }
+    const pending = runPlan(f.host, policy, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false })
+    await f.started(2); f.finish('two'); await completedSibling.promise; controller.abort()
+    const cancelled = await pending
+    expect(cancelled.taskStates?.find(state => state.taskId === 'one')).toMatchObject({ state: 'CANCELLED', attempts: 1 })
+    expect(cancelled.taskStates?.find(state => state.taskId === 'review')).toMatchObject({ state: 'CANCELLED', attempts: 0 })
+    const restored = fixture(f.session.snapshotEvents())
+    const unchanged = await runPlan(restored.host, policy, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false, runId: cancelled.runId })
+    expect(restored.starts).toHaveLength(0)
+    expect(unchanged.taskStates?.find(state => state.taskId === 'one')).toMatchObject({ state: 'CANCELLED', attempts: 1 })
+    expect(unchanged.taskStates?.find(state => state.taskId === 'review')).toMatchObject({ state: 'WAITING', attempts: 0 })
+    restored.host.childIsLive = () => true
+    await expect(runPlan(restored.host, policy, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false, runId: cancelled.runId, resumeContext: { one: 'Finish with the supplied evidence.' } })).rejects.toThrow(/still live/)
+    restored.host.childIsLive = () => false
+    const resumed = runPlan(restored.host, policy, { objective: 'Check', plan: graph, planOnly: false, executeWrites: false, runId: cancelled.runId, resumeContext: { one: 'Finish with the supplied evidence.' } })
+    await restored.started(1)
+    expect(restored.starts[0].request.agentOptions).toMatchObject({ provider: 'muse', model: 'muse-spark-1.3', reasoningEffort: 'low' })
+    restored.finish('one'); await restored.started(2); restored.finish('review')
+    const result = await resumed
+    expect(result.status).toBe('completed')
+    expect(restored.starts.map(start => start.id)).toEqual(['one', 'review'])
+    expect(result.taskStates?.find(state => state.taskId === 'two')).toEqual(cancelled.taskStates?.find(state => state.taskId === 'two'))
+    expect(result.workers.find(worker => worker.taskId === 'two')).toEqual(cancelled.workers.find(worker => worker.taskId === 'two'))
   })
 
   it('runs a large-context task alone, then fills both slots immediately', async () => {

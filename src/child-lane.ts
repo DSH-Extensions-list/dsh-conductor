@@ -8,9 +8,11 @@ interface Waiter {
 
 /** FIFO admission. A holder releases only after its child has fully disposed. */
 export class ChildLane {
-  private held = false
+  private held = 0
   private closed = false
   private readonly queue: Waiter[] = []
+
+  constructor(private readonly capacity: () => number = () => 1) {}
 
   acquire(signal: AbortSignal): Promise<() => void> {
     if (this.closed) return Promise.reject(new Error('Child lane is closed'))
@@ -30,6 +32,7 @@ export class ChildLane {
       signal.addEventListener('abort', waiter.onAbort, { once: true })
       this.admit()
     })
+    this.admit()
   }
 
   close(): void {
@@ -42,17 +45,18 @@ export class ChildLane {
   }
 
   private admit(): void {
-    if (this.held || this.closed) return
+    if (this.held >= this.capacity() || this.closed) return
     const waiter = this.queue.shift()
     if (waiter === undefined) return
     waiter.signal.removeEventListener('abort', waiter.onAbort)
-    this.held = true
+    this.held += 1
     let released = false
     waiter.resolve(() => {
       if (released) return
       released = true
-      this.held = false
+      this.held -= 1
       this.admit()
     })
+    this.admit()
   }
 }

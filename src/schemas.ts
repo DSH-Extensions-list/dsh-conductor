@@ -25,6 +25,16 @@ export const TOOL_PLAN_SCHEMA = {
           dependsOn: { type: 'array', items: { type: 'string' }, required: true },
           readOnly: { type: 'boolean', required: true },
           writeScopes: { type: 'array', items: { type: 'string' }, required: true },
+          model: {
+            type: 'object',
+            description: 'Optional explicit route overriding worker/reviewer defaults. Call conductor_models to inspect available provider/model identifiers and supported reasoning efforts, then copy exact identifiers.',
+            additionalProperties: false,
+            properties: {
+              provider: { type: 'string', required: true },
+              model: { type: 'string', required: true },
+              reasoningEffort: { type: 'string' },
+            },
+          },
           contextBudget: { type: 'integer', description: 'Positive combined context capacity; automatic policies resolve the exact model window.' },
           outputReserveTokens: { type: 'integer' },
           safetyReserveTokens: { type: 'integer' },

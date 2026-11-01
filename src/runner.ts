@@ -7,7 +7,7 @@ import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagen
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import type { OrchestrationResult, PlannedTask, TaskPlan, TaskState, WorkerReport, TaskModel } from './types.js'
-import { readPlan, readWorker, readReview, record, positiveInteger, compactReport } from './validation.js'
+import { readPlan, readWorker, readReview, record, positiveInteger, compactReport, readTaskModel } from './validation.js'
 import { formatTaskModel } from './model-label.js'
 import { WORKER_SCHEMA, REVIEW_SCHEMA } from './schemas.js'
 import type { ContextConcurrencyLimit } from './resource-manager.js'
@@ -49,6 +49,11 @@ export interface RunnerPolicy {
   reviewerModel?: ModelSelection
 }
 
+/** Resolve an explicit task route before reviewer and worker deployment defaults. */
+export function taskModelFor(task: PlannedTask, policy: Pick<RunnerPolicy, 'workerModel' | 'reviewerModel'>): TaskModel | undefined {
+  return task.model ?? (task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel)
+}
+
 /** One explicit invocation, with optional missing data for a saved run. */
 export interface RunRequest {
   objective: string
@@ -84,6 +89,7 @@ export function projectTodo(plan: TaskPlan, states: readonly TaskState[]): TodoI
 
 /** Validate deployment-dependent obligations before persisting or starting work. */
 export function validateScheduling(plan: TaskPlan, policy: RunnerPolicy): void {
+  for (const task of plan.tasks) if (task.model !== undefined) readTaskModel(task.model)
   if (plan.tasks.length > policy.maxWorkers) throw new TypeError(`Plan exceeds the ${policy.maxWorkers}-task ceiling, including review`)
   const reviewers = plan.tasks.filter(task => task.role === 'reviewer')
   if (policy.requireReview && reviewers.length !== 1) throw new TypeError('Plan must assign exactly one final reviewer')
@@ -112,10 +118,7 @@ function readCheckpoint(value: unknown, policy: RunnerPolicy): Checkpoint {
     if (task === undefined || state === undefined || typeof item.reason !== 'string' || typeof item.attempts !== 'number' || !Number.isSafeInteger(item.attempts) || item.attempts < 0) throw new TypeError('Malformed checkpoint task state')
     let model: TaskModel | undefined
     if (item.model !== undefined) {
-      const rawModel = record(item.model)
-      if (typeof rawModel.provider !== 'string' || !rawModel.provider.trim() || typeof rawModel.model !== 'string' || !rawModel.model.trim()
-        || rawModel.reasoningEffort !== undefined && (typeof rawModel.reasoningEffort !== 'string' || !rawModel.reasoningEffort.trim())) throw new TypeError('Malformed checkpoint model')
-      model = { provider: rawModel.provider, model: rawModel.model, ...(typeof rawModel.reasoningEffort === 'string' ? { reasoningEffort: rawModel.reasoningEffort } : {}) }
+      model = readTaskModel(item.model)
     }
     if (item.modelSource !== undefined && (!model || !['assigned','request'].includes(String(item.modelSource)))) throw new TypeError('Malformed checkpoint model source')
     return { taskId: task.id, owner: task.owner, state, attempts: item.attempts, reason: item.reason,
@@ -165,11 +168,11 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
   const changedTasks = new Set<string>()
   if (previous !== undefined) {
     if (previous.objective !== request.objective || previous.result.plan.tasks.length !== request.plan.tasks.length) throw new TypeError('Resume must keep the objective and assigned task identities')
-    const assignment = (task: PlannedTask): string => JSON.stringify({ id: task.id, title: task.title, owner: task.owner, role: task.role, prompt: task.prompt, dependsOn: task.dependsOn, readOnly: task.readOnly, writeScopes: task.writeScopes })
+    const assignment = (task: PlannedTask): string => JSON.stringify({ id: task.id, title: task.title, owner: task.owner, role: task.role, prompt: task.prompt, dependsOn: task.dependsOn, readOnly: task.readOnly, writeScopes: task.writeScopes, model: task.model === undefined ? undefined : readTaskModel(task.model) })
     for (const task of request.plan.tasks) {
       const original = previous.result.plan.tasks.find(item => item.id === task.id)
       if (original === undefined || assignment(original) !== assignment(task)) throw new TypeError('Resume cannot change task assignments, goals, dependencies or write permissions')
-      if (JSON.stringify(original) === JSON.stringify(task)) continue
+      if (JSON.stringify({ ...original, model: original.model === undefined ? undefined : readTaskModel(original.model) }) === JSON.stringify({ ...task, model: task.model === undefined ? undefined : readTaskModel(task.model) })) continue
       if (previous.result.taskStates.find(state => state.taskId === task.id)!.state === 'DONE') throw new TypeError('Completed task inputs cannot change when reusing its evidence')
       changedTasks.add(task.id)
     }
@@ -179,7 +182,7 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
   for (const [id, context] of Object.entries(extra)) {
     if (!request.plan.tasks.some(task => task.id === id) || typeof context !== 'string' || context.trim().length === 0 || context.length > policy.maxHandoffChars) throw new TypeError(`Invalid resumeContext for ${id}`)
   }
-  const modelFor = (task: PlannedTask): TaskModel | undefined => task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel
+  const modelFor = (task: PlannedTask): TaskModel | undefined => taskModelFor(task, policy)
   const checkpoint: Checkpoint = previous === undefined ? {
     version: 1, runId: OrchestrationRunId(randomUUID()), objective: request.objective,
     result: { status: 'blocked', summary: 'Plan saved; tasks are waiting to start.', plan: request.plan,
@@ -197,7 +200,8 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
     if (state.state === 'ACTIVE') {
       state.state = 'WAITING'; state.reason = 'previous run interrupted; instructions are needed to resume'
     }
-    if (state.state === 'WAITING' && state.attempts === 0) state.state = 'QUEUED'
+    // Explicit resume may admit never-started work again; attempted cancellations still need new context.
+    if ((state.state === 'WAITING' || state.state === 'CANCELLED') && state.attempts === 0) state.state = 'QUEUED'
     if ((extra[state.taskId] !== undefined || changedTasks.has(state.taskId)) && state.state !== 'DONE') {
       state.state = 'QUEUED'; state.reason = 'new information received'
     }
@@ -238,7 +242,7 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
       `Objective: ${request.objective}`, `Task: ${task.id}. Assigned worker: ${task.owner}. Role: ${task.role}.`,
       task.prompt, `Task packet: ${JSON.stringify(task.taskPackage ?? { taskId: task.id, goal: task.prompt })}`,
       `Read-only: ${task.readOnly}. Declared write scopes: ${JSON.stringify(task.writeScopes)}.`,
-      `Context ceiling including output and safety: ${task.contextBudget}. Output limit per request: ${task.outputReserveTokens}.`,
+      taskModelFor(task, policy)?.provider === 'muse' ? 'The official Muse CLI owns model context, compaction and output limits; Conductor does not impose a native DSH token cap on this external process.' : `Context ceiling including output and safety: ${task.contextBudget}. Output limit per request: ${task.outputReserveTokens}.`,
       `The worker report taskId must be exactly ${JSON.stringify(task.id)}. Return structured evidence. Do not delegate or start an orchestration.`,
       'If data or budget is missing, return needs_more_context with a precise NEED_FILE/NEED_HISTORY/NEED_BUDGET request. Do not invent missing information.',
       reports.length === 0 ? '' : `Dependency reports (partial text may be marked compacted):\n${reports.join('\n')}`,
@@ -258,13 +262,13 @@ export async function runPlan(host: RunnerHost, policy: RunnerPolicy, request: R
       else { delete state.model; delete state.modelSource }
       state.state = 'ACTIVE'; state.reason = 'running'; state.attempts += 1; result.agentsStarted += 1; save()
       const schema: ObjectJsonSchema = task.role === 'reviewer' ? REVIEW_SCHEMA : { ...WORKER_SCHEMA, properties: { ...WORKER_SCHEMA.properties, taskId: { type: 'string', const: task.id } } }
-      const model = task.role === 'reviewer' ? policy.reviewerModel ?? policy.workerModel : policy.workerModel
+      const model = modelFor(task)
       run = await host.start({
         parent: host.parent, signal, label: `${task.owner}: ${task.title}`,
         prompt: [{ type: 'text', text: prompt }], outputSchema: schema,
         agentOptions: { maxTokens: task.outputReserveTokens!, ...(model === undefined
           ? policy.subagentModel === undefined ? {} : { model: policy.subagentModel }
-          : { ...model, reasoningEffort: model.reasoningEffort }) },
+          : { ...model, reasoningEffort: model.reasoningEffort as ModelSelection['reasoningEffort'] }) },
       }, task, observed => {
         if (state.modelSource === 'request' && state.model?.provider === observed.provider && state.model.model === observed.model
           && state.model.reasoningEffort === observed.reasoningEffort) return

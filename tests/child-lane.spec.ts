@@ -4,6 +4,20 @@ import { ChildLane } from '../src/child-lane.ts'
 const flush = async () => { for (let i = 0; i < 4; i++) await Promise.resolve() }
 
 describe('ChildLane', () => {
+  it('honors a shared configured capacity without releasing a live next holder', async () => {
+    const lane = new ChildLane(() => 2), signal = new AbortController().signal
+    const first = await lane.acquire(signal), second = await lane.acquire(signal)
+    let thirdAdmitted = false
+    const third = lane.acquire(signal).then(release => { thirdAdmitted = true; return release })
+    await flush(); expect(thirdAdmitted).toBe(false)
+    first(); const releaseThird = await third
+    expect(thirdAdmitted).toBe(true)
+    first(); let fourthAdmitted = false
+    const fourth = lane.acquire(signal).then(release => { fourthAdmitted = true; return release })
+    await flush(); expect(fourthAdmitted).toBe(false)
+    second(); (await fourth)(); releaseThird(); lane.close()
+  })
+
   it('admits one child across owners and grants queued children in FIFO order', async () => {
     const lane = new ChildLane()
     const signal = new AbortController().signal
